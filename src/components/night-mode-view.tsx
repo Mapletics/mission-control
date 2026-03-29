@@ -1,24 +1,23 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
-  Moon,
-  RefreshCw,
-  GitBranch,
-  Clock,
-  ExternalLink,
+  AlertCircle,
   ChevronDown,
   ChevronRight,
-  X,
-  AlertCircle,
-  CheckCircle2,
-  CircleDot,
-  Ban,
+  Clock,
+  ExternalLink,
   FileText,
+  GitBranch,
+  Moon,
+  RefreshCw,
+  X,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { CodingFactoryIntake, type AvailableIssue, type IntakeState } from "@/components/coding-factory-intake";
+import { CodingFactoryRunSummary } from "@/components/coding-factory-run-summary";
 import { SectionBody, SectionHeader, SectionLayout } from "@/components/section-layout";
 import { LoadingState } from "@/components/ui/loading-state";
+import { cn } from "@/lib/utils";
 import { useSmartPoll } from "@/hooks/use-smart-poll";
 
 /* ── Types ── */
@@ -43,11 +42,11 @@ type Issue = {
   merged: boolean;
   startedAt: string;
   updatedAt: string;
-  duration?: number;
+  duration?: number | null;
   history: IssueHistory[];
 };
 
-type NightModeData = {
+type CodingFactoryData = {
   isRunning: boolean;
   status: string;
   integrationBranch: string | null;
@@ -62,6 +61,8 @@ type NightModeData = {
     inProgress: number;
     prsCreated: number;
   };
+  intake: IntakeState;
+  availableIssues: AvailableIssue[];
 };
 
 /* ── Constants ── */
@@ -81,24 +82,17 @@ const PHASE_COLORS: Record<string, string> = {
   blocked: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
   aborted: "bg-stone-100 text-stone-600 dark:bg-stone-700/60 dark:text-stone-300",
   failed: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
+  started: "bg-stone-100 text-stone-700 dark:bg-stone-700/60 dark:text-stone-200",
 };
 
 const SIZE_COLORS: Record<string, string> = {
   S: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
   M: "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
   L: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
+  "": "bg-stone-100 text-stone-600 dark:bg-stone-700/60 dark:text-stone-300",
 };
 
 /* ── Helpers ── */
-
-function formatElapsed(startedAt: string): string {
-  const ms = Date.now() - new Date(startedAt).getTime();
-  const mins = Math.floor(ms / 60000);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  const remainMins = mins % 60;
-  return `${hours}h ${remainMins}m`;
-}
 
 function formatDuration(mins: number): string {
   if (mins < 60) return `${mins}m`;
@@ -111,17 +105,26 @@ function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function formatUpdatedAt(iso: string): string {
+  return new Date(iso).toLocaleString([], {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function phaseIndex(phase: string): number {
   const idx = PHASES_ORDERED.indexOf(phase);
-  return idx >= 0 ? idx : (phase === "pr-created" ? PHASES_ORDERED.length - 1 : -1);
+  return idx >= 0 ? idx : phase === "pr-created" ? PHASES_ORDERED.length - 1 : -1;
 }
 
 function computeProgress(issue: Issue): number {
   if (issue.phase === "done" || issue.phase === "pr-created") return 100;
 
   let maxIdx = phaseIndex(issue.phase);
-  for (const h of issue.history) {
-    const idx = phaseIndex(h.phase);
+  for (const event of issue.history) {
+    const idx = phaseIndex(event.phase);
     if (idx > maxIdx) maxIdx = idx;
   }
 
@@ -139,21 +142,21 @@ function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
 
   const fetchLogs = useCallback(async () => {
     try {
-      const res = await fetch(`/api/night-mode/logs?issue=${issue}`, {
+      const response = await fetch(`/api/night-mode/logs?issue=${issue}`, {
         cache: "no-store",
         signal: AbortSignal.timeout(10000),
       });
-      if (!res.ok) return;
-      const data = await res.json();
-      setLines(data.lines || []);
-      setExists(data.exists ?? false);
+      if (!response.ok) return;
+      const payload = await response.json();
+      setLines(payload.lines || []);
+      setExists(payload.exists ?? false);
       requestAnimationFrame(() => {
         if (scrollRef.current) {
           scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
       });
     } catch {
-      // ignore
+      // ignore log polling errors in the overlay
     }
     setLoading(false);
   }, [issue]);
@@ -204,8 +207,8 @@ function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
           ) : lines.length === 0 ? (
             <div className="flex items-center justify-center py-12 text-stone-500">Log is empty</div>
           ) : (
-            lines.map((line, i) => (
-              <div key={i} className="whitespace-pre-wrap break-all">
+            lines.map((line, index) => (
+              <div key={index} className="whitespace-pre-wrap break-all">
                 {line}
               </div>
             ))
@@ -218,25 +221,23 @@ function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
 
 /* ── Issue Card ── */
 
-function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (n: number) => void }) {
+function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issueNumber: number) => void }) {
   const [expanded, setExpanded] = useState(false);
   const progress = computeProgress(issue);
   const phaseColor = PHASE_COLORS[issue.phase] || PHASE_COLORS.aborted;
-  const sizeColor = SIZE_COLORS[issue.size] || SIZE_COLORS.M;
+  const sizeColor = SIZE_COLORS[issue.size] || SIZE_COLORS[""];
 
   return (
     <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm dark:border-[#2c343d] dark:bg-[#171a1d]">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-bold text-stone-900 dark:text-[#f5f7fa]">
-              #{issue.issue}
-            </span>
+            <span className="text-sm font-bold text-stone-900 dark:text-[#f5f7fa]">#{issue.issue}</span>
             <span className={cn("rounded-full px-2 py-0.5 text-xs font-semibold", phaseColor)}>
               {issue.phase}
             </span>
             <span className={cn("rounded-full px-2 py-0.5 text-xs font-semibold", sizeColor)}>
-              {issue.size}
+              {issue.size || "—"}
             </span>
             {issue.merged && (
               <span className="rounded-full bg-purple-100 px-2 py-0.5 text-xs font-semibold text-purple-700 dark:bg-purple-500/15 dark:text-purple-300">
@@ -248,12 +249,13 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (n: number) 
           <p className="mt-0.5 text-xs text-stone-400 dark:text-[#7a8591]">{issue.repo}</p>
           <div className="mt-2 flex flex-wrap gap-2 text-xs text-stone-500 dark:text-[#8d98a5]">
             <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 dark:bg-[#20252a]">
-              <GitBranch className="h-3 w-3" />
-              branch {issue.branch}
+              <GitBranch className="h-3 w-3" /> branch {issue.branch}
             </span>
             <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 dark:bg-[#20252a]">
-              <GitBranch className="h-3 w-3" />
-              base {issue.baseBranch}
+              <GitBranch className="h-3 w-3" /> base {issue.baseBranch}
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 dark:bg-[#20252a]">
+              <Clock className="h-3 w-3" /> updated {formatUpdatedAt(issue.updatedAt)}
             </span>
           </div>
         </div>
@@ -284,11 +286,9 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (n: number) 
           <div
             className={cn(
               "h-full rounded-full transition-all duration-500",
-              issue.phase === "failed" || issue.phase === "aborted"
+              issue.phase === "failed" || issue.phase === "aborted" || issue.phase === "blocked"
                 ? "bg-red-400 dark:bg-red-500"
-                : issue.phase === "blocked"
-                  ? "bg-red-400 dark:bg-red-500"
-                  : "bg-emerald-400 dark:bg-emerald-500",
+                : "bg-emerald-400 dark:bg-emerald-500",
             )}
             style={{ width: `${progress}%` }}
           />
@@ -306,7 +306,7 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (n: number) 
         <div className="mt-3">
           <button
             type="button"
-            onClick={() => setExpanded((prev) => !prev)}
+            onClick={() => setExpanded((value) => !value)}
             className="flex items-center gap-1 text-xs font-medium text-stone-500 transition-colors hover:text-stone-700 dark:text-[#8d98a5] dark:hover:text-[#c7d0d9]"
           >
             {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
@@ -314,22 +314,20 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (n: number) 
           </button>
           {expanded && (
             <div className="mt-2 space-y-1 border-l-2 border-stone-200 pl-3 dark:border-[#2c343d]">
-              {issue.history.map((h, i) => {
-                const hColor = PHASE_COLORS[h.phase] || PHASE_COLORS.aborted;
+              {issue.history.map((entry, index) => {
+                const historyColor = PHASE_COLORS[entry.phase] || PHASE_COLORS.aborted;
                 return (
-                  <div key={i} className="flex items-center gap-2 text-xs">
-                    <span className="shrink-0 text-stone-400 dark:text-[#7a8591]">
-                      {formatTime(h.at)}
+                  <div key={index} className="flex items-center gap-2 text-xs">
+                    <span className="shrink-0 text-stone-400 dark:text-[#7a8591]">{formatTime(entry.at)}</span>
+                    <span className={cn("rounded-full px-1.5 py-0.5 text-xs font-medium", historyColor)}>
+                      {entry.phase}
                     </span>
-                    <span className={cn("rounded-full px-1.5 py-0.5 text-xs font-medium", hColor)}>
-                      {h.phase}
-                    </span>
-                    <span className="text-stone-600 dark:text-[#a8b0ba]">{h.status}</span>
-                    {h.round != null && (
-                      <span className="text-stone-400 dark:text-[#7a8591]">round {h.round}</span>
+                    <span className="text-stone-600 dark:text-[#a8b0ba]">{entry.status}</span>
+                    {entry.round != null && (
+                      <span className="text-stone-400 dark:text-[#7a8591]">round {entry.round}</span>
                     )}
-                    {h.extra && (
-                      <span className="truncate text-stone-400 dark:text-[#7a8591]">{h.extra}</span>
+                    {entry.extra && (
+                      <span className="truncate text-stone-400 dark:text-[#7a8591]">{entry.extra}</span>
                     )}
                   </div>
                 );
@@ -345,37 +343,66 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (n: number) 
 /* ── Main View ── */
 
 export function NightModeView() {
-  const [data, setData] = useState<NightModeData | null>(null);
+  const [data, setData] = useState<CodingFactoryData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [savingIntake, setSavingIntake] = useState(false);
+  const [intakeError, setIntakeError] = useState<string | null>(null);
   const [logIssue, setLogIssue] = useState<number | null>(null);
   const hasLoadedOnce = useRef(false);
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch("/api/night-mode", {
+      const response = await fetch("/api/coding-factory", {
         cache: "no-store",
         signal: AbortSignal.timeout(10000),
       });
-      if (!res.ok) {
-        const msg = `Failed to load coding factory data (${res.status})`;
-        if (!hasLoadedOnce.current) setError(msg);
+      if (!response.ok) {
+        const message = `Failed to load coding factory data (${response.status})`;
+        if (!hasLoadedOnce.current) setError(message);
         setLoading(false);
         setRefreshing(false);
         return;
       }
-      const json = await res.json();
-      setData(json);
+      const payload = await response.json();
+      setData(payload);
       setError(null);
       hasLoadedOnce.current = true;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Network error";
-      if (!hasLoadedOnce.current) setError(msg);
+      const message = err instanceof Error ? err.message : "Network error";
+      if (!hasLoadedOnce.current) setError(message);
     }
     setLoading(false);
     setRefreshing(false);
   }, []);
+
+  const saveIntake = useCallback(async (nextIntake: IntakeState) => {
+    setData((current) => (current ? { ...current, intake: nextIntake } : current));
+    setSavingIntake(true);
+    setIntakeError(null);
+
+    try {
+      const response = await fetch("/api/coding-factory/intake", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(nextIntake),
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to save intake (${response.status})`);
+      }
+
+      const saved = await response.json();
+      setData((current) => (current ? { ...current, intake: saved } : current));
+    } catch (err) {
+      setIntakeError(err instanceof Error ? err.message : "Failed to save intake");
+      fetchData();
+    }
+
+    setSavingIntake(false);
+  }, [fetchData]);
 
   useSmartPoll(fetchData, { intervalMs: 10_000 });
 
@@ -386,8 +413,6 @@ export function NightModeView() {
       </SectionLayout>
     );
   }
-
-  const stats = data?.stats;
 
   return (
     <SectionLayout>
@@ -440,63 +465,25 @@ export function NightModeView() {
 
         {data && (
           <>
-            <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm dark:border-[#2c343d] dark:bg-[#171a1d]">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex items-center gap-3">
-                  <span className="relative flex h-3 w-3">
-                    {data.isRunning ? (
-                      <>
-                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                        <span className="relative inline-flex h-3 w-3 rounded-full bg-emerald-500" />
-                      </>
-                    ) : (
-                      <span className="relative inline-flex h-3 w-3 rounded-full bg-stone-300 dark:bg-stone-600" />
-                    )}
-                  </span>
-                  <span className="text-sm font-semibold text-stone-900 dark:text-[#f5f7fa]">
-                    {data.isRunning ? "Coding Factory Running" : "Coding Factory Stopped"}
-                  </span>
-                  <span
-                    className={cn(
-                      "rounded-full px-2 py-0.5 text-xs font-medium",
-                      data.status === "running"
-                        ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
-                        : "bg-stone-100 text-stone-600 dark:bg-stone-700/60 dark:text-stone-300",
-                    )}
-                  >
-                    {data.status}
-                  </span>
-                </div>
+            <CodingFactoryIntake
+              intake={data.intake}
+              availableIssues={data.availableIssues}
+              saving={savingIntake}
+              saveError={intakeError}
+              onSave={saveIntake}
+            />
 
-                <div className="flex flex-wrap items-center gap-4 text-xs text-stone-500 dark:text-[#8d98a5]">
-                  {data.integrationBranch && (
-                    <span className="flex items-center gap-1">
-                      <GitBranch className="h-3 w-3" /> {data.integrationBranch}
-                    </span>
-                  )}
-                  {data.startedAt && (
-                    <span className="flex items-center gap-1">
-                      <Clock className="h-3 w-3" /> Started {formatTime(data.startedAt)} ({formatElapsed(data.startedAt)})
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {stats && (
-                <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-stone-100 pt-3 dark:border-[#23282e]">
-                  <StatBadge icon={CircleDot} label="Total" value={stats.total} />
-                  <StatBadge icon={CheckCircle2} label="Completed" value={stats.completed} color="text-emerald-600 dark:text-emerald-400" />
-                  <StatBadge icon={AlertCircle} label="Failed" value={stats.failed} color="text-red-600 dark:text-red-400" />
-                  <StatBadge icon={Ban} label="Blocked" value={stats.blocked} color="text-red-600 dark:text-red-400" />
-                  <StatBadge icon={RefreshCw} label="In Progress" value={stats.inProgress} color="text-blue-600 dark:text-blue-400" />
-                  <StatBadge icon={ExternalLink} label="PRs Created" value={stats.prsCreated} color="text-purple-600 dark:text-purple-400" />
-                </div>
-              )}
-            </div>
+            <CodingFactoryRunSummary
+              isRunning={data.isRunning}
+              status={data.status}
+              integrationBranch={data.integrationBranch}
+              startedAt={data.startedAt}
+              stats={data.stats}
+            />
 
             {data.issues.length === 0 ? (
-              <div className="flex items-center justify-center py-12 text-sm text-stone-500 dark:text-[#8d98a5]">
-                No issues in pipeline
+              <div className="flex items-center justify-center rounded-xl border border-dashed border-stone-200 py-12 text-sm text-stone-500 dark:border-[#2c343d] dark:text-[#8d98a5]">
+                No issues in the active runtime pipeline
               </div>
             ) : (
               data.issues.map((issue) => (
@@ -509,27 +496,5 @@ export function NightModeView() {
 
       {logIssue !== null && <LogPanel issue={logIssue} onClose={() => setLogIssue(null)} />}
     </SectionLayout>
-  );
-}
-
-/* ── Stat Badge ── */
-
-function StatBadge({
-  icon: Icon,
-  label,
-  value,
-  color,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: number;
-  color?: string;
-}) {
-  return (
-    <span className={cn("flex items-center gap-1 text-xs", color || "text-stone-500 dark:text-[#8d98a5]")}>
-      <Icon className="h-3 w-3" />
-      <span className="font-semibold">{value}</span>
-      <span>{label}</span>
-    </span>
   );
 }
