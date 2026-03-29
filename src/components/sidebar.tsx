@@ -74,7 +74,7 @@ const defaultNavItems: NavItem[] = [
   { group: "Work", section: "tasks", label: "Tasks", icon: ListChecks, href: "/tasks" },
   { section: "cron", label: "Cron Jobs", icon: Clock, href: "/cron" },
   { section: "cron", label: "Heartbeat", icon: Heart, href: "/heartbeat", tab: "heartbeat", isSubItem: true },
-  { section: "night-mode", label: "Night Mode", icon: Moon, href: "/night-mode" },
+  { section: "coding-factory", label: "Coding Factory", icon: Moon, href: "/coding-factory" },
   // ── Knowledge ──
   { group: "Knowledge", section: "memory", label: "Memory", icon: Brain, href: "/memory" },
   // ── Configure ──
@@ -146,6 +146,7 @@ function deriveSectionFromPath(pathname: string): string | null {
     permissions: "security",
     heartbeat: "cron",
     models: "agents",
+    "night-mode": "coding-factory",
   };
   if (aliases[first]) return aliases[first];
   const known = new Set([
@@ -181,6 +182,7 @@ function deriveSectionFromPath(pathname: string): string | null {
     "help",
     "more",
     "night-mode",
+    "coding-factory",
   ]);
   return known.has(first) ? first : null;
 }

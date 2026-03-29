@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { getCodingFactoryStatus } from "@/lib/coding-factory";
+import { listAvailableIssues } from "@/lib/coding-factory";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const status = await getCodingFactoryStatus();
-    return NextResponse.json(status);
+    const items = await listAvailableIssues();
+    return NextResponse.json({ items });
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }

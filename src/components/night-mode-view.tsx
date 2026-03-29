@@ -116,25 +116,15 @@ function phaseIndex(phase: string): number {
   return idx >= 0 ? idx : (phase === "pr-created" ? PHASES_ORDERED.length - 1 : -1);
 }
 
-function phaseProgress(phase: string): number {
-  if (phase === "done" || phase === "pr-created") return 100;
-  if (phase === "blocked" || phase === "failed" || phase === "aborted") {
-    // Show progress up to where it stopped
-    return 0; // Will be computed from history
-  }
-  const idx = phaseIndex(phase);
-  if (idx < 0) return 0;
-  return Math.round((idx / (PHASES_ORDERED.length - 1)) * 100);
-}
-
 function computeProgress(issue: Issue): number {
   if (issue.phase === "done" || issue.phase === "pr-created") return 100;
-  // Find furthest phase reached in history
+
   let maxIdx = phaseIndex(issue.phase);
   for (const h of issue.history) {
     const idx = phaseIndex(h.phase);
     if (idx > maxIdx) maxIdx = idx;
   }
+
   if (maxIdx < 0) return 0;
   return Math.round((maxIdx / (PHASES_ORDERED.length - 1)) * 100);
 }
@@ -157,7 +147,6 @@ function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
       const data = await res.json();
       setLines(data.lines || []);
       setExists(data.exists ?? false);
-      // Auto-scroll to bottom
       requestAnimationFrame(() => {
         if (scrollRef.current) {
           scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -174,7 +163,6 @@ function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="relative mx-4 flex h-[80vh] w-full max-w-4xl flex-col rounded-xl border border-stone-200 bg-white shadow-xl dark:border-[#2c343d] dark:bg-[#171a1d]">
-        {/* Header */}
         <div className="flex shrink-0 items-center justify-between border-b border-stone-200 px-4 py-3 dark:border-[#2c343d]">
           <div className="flex items-center gap-2">
             <FileText className="h-4 w-4 text-stone-500 dark:text-[#8d98a5]" />
@@ -185,7 +173,10 @@ function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => { setLoading(true); fetchLogs(); }}
+              onClick={() => {
+                setLoading(true);
+                fetchLogs();
+              }}
               className="rounded-lg border border-stone-200 bg-white px-2.5 py-1 text-xs font-medium text-stone-600 transition-colors hover:bg-stone-50 dark:border-[#2c343d] dark:bg-[#171a1d] dark:text-[#c7d0d9] dark:hover:bg-[#20252a]"
             >
               <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} />
@@ -200,7 +191,6 @@ function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
           </div>
         </div>
 
-        {/* Log content */}
         <div
           ref={scrollRef}
           className="flex-1 overflow-y-auto bg-stone-950 p-4 font-mono text-xs leading-5 text-stone-300"
@@ -236,7 +226,6 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (n: number) 
 
   return (
     <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm dark:border-[#2c343d] dark:bg-[#171a1d]">
-      {/* Top row: issue number, title, badges */}
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -257,6 +246,16 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (n: number) 
           </div>
           <p className="mt-1 text-sm text-stone-700 dark:text-[#c7d0d9]">{issue.title}</p>
           <p className="mt-0.5 text-xs text-stone-400 dark:text-[#7a8591]">{issue.repo}</p>
+          <div className="mt-2 flex flex-wrap gap-2 text-xs text-stone-500 dark:text-[#8d98a5]">
+            <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 dark:bg-[#20252a]">
+              <GitBranch className="h-3 w-3" />
+              branch {issue.branch}
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 dark:bg-[#20252a]">
+              <GitBranch className="h-3 w-3" />
+              base {issue.baseBranch}
+            </span>
+          </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
@@ -280,7 +279,6 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (n: number) 
         </div>
       </div>
 
-      {/* Progress bar */}
       <div className="mt-3 flex items-center gap-3">
         <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-stone-100 dark:bg-[#23282e]">
           <div
@@ -304,7 +302,6 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (n: number) 
         </div>
       </div>
 
-      {/* Expandable history */}
       {issue.history.length > 0 && (
         <div className="mt-3">
           <button
@@ -362,7 +359,7 @@ export function NightModeView() {
         signal: AbortSignal.timeout(10000),
       });
       if (!res.ok) {
-        const msg = `Failed to load night mode data (${res.status})`;
+        const msg = `Failed to load coding factory data (${res.status})`;
         if (!hasLoadedOnce.current) setError(msg);
         setLoading(false);
         setRefreshing(false);
@@ -385,7 +382,7 @@ export function NightModeView() {
   if (loading) {
     return (
       <SectionLayout>
-        <LoadingState label="Loading night mode..." />
+        <LoadingState label="Loading coding factory..." />
       </SectionLayout>
     );
   }
@@ -398,10 +395,10 @@ export function NightModeView() {
         title={
           <span className="flex items-center gap-2.5">
             <Moon className="h-6 w-6" />
-            Night Mode
+            Coding Factory
           </span>
         }
-        description="Automated overnight issue processing via AI agents"
+        description="Dashboard-driven issue automation built on the existing Night Mode run engine"
         actions={
           <button
             type="button"
@@ -418,13 +415,12 @@ export function NightModeView() {
       />
 
       <SectionBody width="content" padding="compact" innerClassName="space-y-4">
-        {/* Error banner */}
         {error && !data && (
           <div className="flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 dark:border-red-500/20 dark:bg-red-500/10">
             <AlertCircle className="h-4 w-4 shrink-0 text-red-500" />
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium text-red-700 dark:text-red-400">
-                Failed to load night mode data
+                Failed to load coding factory data
               </p>
               <p className="mt-0.5 text-xs text-red-600 dark:text-red-300/70">{error}</p>
             </div>
@@ -444,7 +440,6 @@ export function NightModeView() {
 
         {data && (
           <>
-            {/* Status Banner */}
             <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm dark:border-[#2c343d] dark:bg-[#171a1d]">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-center gap-3">
@@ -459,14 +454,16 @@ export function NightModeView() {
                     )}
                   </span>
                   <span className="text-sm font-semibold text-stone-900 dark:text-[#f5f7fa]">
-                    {data.isRunning ? "Night Mode Running" : "Night Mode Stopped"}
+                    {data.isRunning ? "Coding Factory Running" : "Coding Factory Stopped"}
                   </span>
-                  <span className={cn(
-                    "rounded-full px-2 py-0.5 text-xs font-medium",
-                    data.status === "running"
-                      ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
-                      : "bg-stone-100 text-stone-600 dark:bg-stone-700/60 dark:text-stone-300",
-                  )}>
+                  <span
+                    className={cn(
+                      "rounded-full px-2 py-0.5 text-xs font-medium",
+                      data.status === "running"
+                        ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
+                        : "bg-stone-100 text-stone-600 dark:bg-stone-700/60 dark:text-stone-300",
+                    )}
+                  >
                     {data.status}
                   </span>
                 </div>
@@ -485,7 +482,6 @@ export function NightModeView() {
                 </div>
               </div>
 
-              {/* Stats bar */}
               {stats && (
                 <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-stone-100 pt-3 dark:border-[#23282e]">
                   <StatBadge icon={CircleDot} label="Total" value={stats.total} />
@@ -498,7 +494,6 @@ export function NightModeView() {
               )}
             </div>
 
-            {/* Issue Pipeline */}
             {data.issues.length === 0 ? (
               <div className="flex items-center justify-center py-12 text-sm text-stone-500 dark:text-[#8d98a5]">
                 No issues in pipeline
@@ -512,10 +507,7 @@ export function NightModeView() {
         )}
       </SectionBody>
 
-      {/* Log modal */}
-      {logIssue !== null && (
-        <LogPanel issue={logIssue} onClose={() => setLogIssue(null)} />
-      )}
+      {logIssue !== null && <LogPanel issue={logIssue} onClose={() => setLogIssue(null)} />}
     </SectionLayout>
   );
 }
