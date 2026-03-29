@@ -58,6 +58,7 @@ export type CodingFactoryIntakeState = {
   version: 1;
   updatedAt: string;
   mode: CodingFactoryMode;
+  targetRepo: string;
   baseBranch: string;
   selectedIssues: CodingFactoryIntakeIssue[];
 };
@@ -90,6 +91,24 @@ export type AvailableIssue = {
   updatedAt: string;
 };
 
+/* ── Unified API response envelope ── */
+
+export type CodingFactoryApiResponse<T = unknown> = {
+  ok: boolean;
+  data?: T;
+  error?: string;
+};
+
+export function apiOk<T>(data: T): CodingFactoryApiResponse<T> {
+  return { ok: true, data };
+}
+
+export function apiError(message: string): CodingFactoryApiResponse<never> {
+  return { ok: false, error: message };
+}
+
+/* ── File I/O ── */
+
 export async function readJson<T>(path: string): Promise<T | null> {
   try {
     const raw = await readFile(path, "utf-8");
@@ -104,11 +123,14 @@ export async function writeJson(path: string, data: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
 }
 
+export const DEFAULT_TARGET_REPO = "Mapletics/App_frontend";
+
 export function defaultIntakeState(): CodingFactoryIntakeState {
   return {
     version: 1,
     updatedAt: new Date().toISOString(),
     mode: "single",
+    targetRepo: DEFAULT_TARGET_REPO,
     baseBranch: "dev",
     selectedIssues: [],
   };
@@ -192,6 +214,9 @@ export function normalizeIntakeState(input: unknown): CodingFactoryIntakeState {
   const fallback = defaultIntakeState();
   const payload = (input && typeof input === "object") ? input as Record<string, unknown> : {};
 
+  const targetRepoRaw = typeof payload.targetRepo === "string" ? payload.targetRepo.trim() : "";
+  const targetRepo = targetRepoRaw && REPO_PATTERN.test(targetRepoRaw) ? targetRepoRaw : fallback.targetRepo;
+
   const baseBranchRaw = typeof payload.baseBranch === "string" ? payload.baseBranch.trim() : fallback.baseBranch;
   const baseBranch = baseBranchRaw && BRANCH_PATTERN.test(baseBranchRaw) ? baseBranchRaw : fallback.baseBranch;
 
@@ -229,6 +254,7 @@ export function normalizeIntakeState(input: unknown): CodingFactoryIntakeState {
     version: 1,
     updatedAt: new Date().toISOString(),
     mode,
+    targetRepo,
     baseBranch,
     selectedIssues,
   };

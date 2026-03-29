@@ -103,6 +103,7 @@ const hostedNavItems: NavItem[] = [
   { section: "sessions", label: "Sessions", icon: MessageSquare, href: "/sessions" },
   // ── Work ──
   { group: "Work", section: "cron", label: "Cron Jobs", icon: Clock, href: "/cron" },
+  { section: "coding-factory", label: "Coding Factory", icon: Moon, href: "/coding-factory" },
   // ── Knowledge ──
   { group: "Knowledge", section: "memory", label: "Memory", icon: Brain, href: "/memory" },
   { section: "docs", label: "Documents", icon: FolderOpen, href: "/documents" },

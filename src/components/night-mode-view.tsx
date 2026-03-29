@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   ChevronDown,
@@ -9,6 +9,7 @@ import {
   ExternalLink,
   FileText,
   GitBranch,
+  Info,
   Moon,
   RefreshCw,
   X,
@@ -68,6 +69,7 @@ type CodingFactoryData = {
 /* ── Constants ── */
 
 const PHASES_ORDERED = ["classify", "research", "plan", "implement", "review", "gate", "ship", "done"];
+const SAVE_DEBOUNCE_MS = 800;
 
 const PHASE_COLORS: Record<string, string> = {
   classify: "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300",
@@ -342,7 +344,7 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issueNumber
 
 /* ── Main View ── */
 
-export function NightModeView() {
+export function NightModeView({ legacy }: { legacy?: boolean }) {
   const [data, setData] = useState<CodingFactoryData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -351,6 +353,11 @@ export function NightModeView() {
   const [intakeError, setIntakeError] = useState<string | null>(null);
   const [logIssue, setLogIssue] = useState<number | null>(null);
   const hasLoadedOnce = useRef(false);
+
+  // Debounce save: keep a pending state ref and a timer
+  const pendingIntakeRef = useRef<IntakeState | null>(null);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savingRef = useRef(false);
 
   const fetchData = useCallback(async () => {
     try {
@@ -365,7 +372,8 @@ export function NightModeView() {
         setRefreshing(false);
         return;
       }
-      const payload = await response.json();
+      const envelope = await response.json();
+      const payload = envelope.ok ? envelope.data : envelope;
       setData(payload);
       setError(null);
       hasLoadedOnce.current = true;
@@ -377,8 +385,8 @@ export function NightModeView() {
     setRefreshing(false);
   }, []);
 
-  const saveIntake = useCallback(async (nextIntake: IntakeState) => {
-    setData((current) => (current ? { ...current, intake: nextIntake } : current));
+  const flushIntakeSave = useCallback(async (intake: IntakeState) => {
+    savingRef.current = true;
     setSavingIntake(true);
     setIntakeError(null);
 
@@ -386,7 +394,7 @@ export function NightModeView() {
       const response = await fetch("/api/coding-factory/intake", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(nextIntake),
+        body: JSON.stringify(intake),
         signal: AbortSignal.timeout(10000),
       });
 
@@ -394,15 +402,57 @@ export function NightModeView() {
         throw new Error(`Failed to save intake (${response.status})`);
       }
 
-      const saved = await response.json();
-      setData((current) => (current ? { ...current, intake: saved } : current));
+      const envelope = await response.json();
+      const saved = envelope.ok ? envelope.data : envelope;
+
+      // If another write came in while we were saving, don't overwrite optimistic state
+      if (!pendingIntakeRef.current) {
+        setData((current) => (current ? { ...current, intake: saved } : current));
+      }
     } catch (err) {
       setIntakeError(err instanceof Error ? err.message : "Failed to save intake");
       fetchData();
     }
 
     setSavingIntake(false);
+    savingRef.current = false;
+
+    // If a newer state was queued while we were saving, flush it now
+    const queued = pendingIntakeRef.current;
+    if (queued) {
+      pendingIntakeRef.current = null;
+      flushIntakeSave(queued);
+    }
   }, [fetchData]);
+
+  const saveIntake = useCallback((nextIntake: IntakeState) => {
+    // Optimistically update the UI immediately
+    setData((current) => (current ? { ...current, intake: nextIntake } : current));
+
+    // If a save is in flight, queue the latest state — last-write-wins
+    if (savingRef.current) {
+      pendingIntakeRef.current = nextIntake;
+      return;
+    }
+
+    // Debounce: clear previous timer, set a new one
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      flushIntakeSave(nextIntake);
+    }, SAVE_DEBOUNCE_MS);
+  }, [flushIntakeSave]);
+
+  // Cleanup debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, []);
 
   useSmartPoll(fetchData, { intervalMs: 10_000 });
 
@@ -440,6 +490,16 @@ export function NightModeView() {
       />
 
       <SectionBody width="content" padding="compact" innerClassName="space-y-4">
+        {legacy && (
+          <div className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 dark:border-blue-500/20 dark:bg-blue-500/10">
+            <Info className="h-4 w-4 shrink-0 text-blue-500" />
+            <p className="text-sm text-blue-700 dark:text-blue-300">
+              You are viewing the legacy <strong>/night-mode</strong> route. This page is now <strong>Coding Factory</strong>.
+              Update your bookmark to <a href="/coding-factory" className="underline font-medium hover:text-blue-900 dark:hover:text-blue-100">/coding-factory</a>.
+            </p>
+          </div>
+        )}
+
         {error && !data && (
           <div className="flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 dark:border-red-500/20 dark:bg-red-500/10">
             <AlertCircle className="h-4 w-4 shrink-0 text-red-500" />

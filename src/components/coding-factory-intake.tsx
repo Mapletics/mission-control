@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { GitBranch, Plus, Save, Trash2 } from "lucide-react";
+import { FolderGit2, GitBranch, Plus, Save, Trash2 } from "lucide-react";
 
 export type CodingFactoryMode = "single" | "batch";
 
@@ -19,6 +19,7 @@ export type IntakeState = {
   version?: number;
   updatedAt?: string;
   mode: CodingFactoryMode;
+  targetRepo: string;
   baseBranch: string;
   selectedIssues: IntakeIssue[];
 };
@@ -37,6 +38,28 @@ type CodingFactoryIntakeProps = {
   onSave: (nextState: IntakeState) => void;
 };
 
+const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const BRANCH_PATTERN = /^[A-Za-z0-9._\/-]+$/;
+
+function validateRepo(value: string): string | null {
+  if (!value.trim()) return "Repo is required (e.g. owner/repo)";
+  if (!REPO_PATTERN.test(value.trim())) return "Invalid format — use owner/repo";
+  return null;
+}
+
+function validateBranch(value: string): string | null {
+  if (!value.trim()) return "Base branch is required";
+  if (!BRANCH_PATTERN.test(value.trim())) return "Invalid branch name";
+  return null;
+}
+
+function validateIssueNumber(value: string): string | null {
+  if (!value.trim()) return "Issue number is required";
+  const num = Number(value);
+  if (!Number.isInteger(num) || num <= 0) return "Must be a positive integer";
+  return null;
+}
+
 function formatUpdatedAt(iso: string) {
   return new Date(iso).toLocaleString([], {
     month: "short",
@@ -44,6 +67,11 @@ function formatUpdatedAt(iso: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function InlineError({ message }: { message: string | null }) {
+  if (!message) return null;
+  return <p className="mt-1 text-xs text-red-600 dark:text-red-400">{message}</p>;
 }
 
 export function CodingFactoryIntake({
@@ -54,8 +82,9 @@ export function CodingFactoryIntake({
   onSave,
 }: CodingFactoryIntakeProps) {
   const [manualIssue, setManualIssue] = useState("");
-  const [manualRepo, setManualRepo] = useState("Mapletics/App_frontend");
+  const [manualRepo, setManualRepo] = useState("");
   const [manualTitle, setManualTitle] = useState("");
+  const [manualTouched, setManualTouched] = useState({ issue: false, repo: false });
 
   const selectedKeys = useMemo(
     () => new Set(intake.selectedIssues.map((item) => `${item.repo}#${item.issue}`)),
@@ -67,9 +96,21 @@ export function CodingFactoryIntake({
     [availableIssues, selectedKeys],
   );
 
+  // Validation for top-level fields
+  const targetRepoError = validateRepo(intake.targetRepo);
+  const baseBranchError = validateBranch(intake.baseBranch);
+
+  // Validation for manual add form
+  const manualIssueError = manualTouched.issue ? validateIssueNumber(manualIssue) : null;
+  const manualRepoError = manualTouched.repo ? validateRepo(manualRepo || intake.targetRepo) : null;
+  const manualAddDisabled =
+    !!validateIssueNumber(manualIssue) ||
+    !!validateRepo(manualRepo || intake.targetRepo);
+
   const commit = (nextState: IntakeState) => {
     onSave({
       ...nextState,
+      targetRepo: nextState.targetRepo || intake.targetRepo,
       baseBranch: nextState.baseBranch || "dev",
     });
   };
@@ -109,24 +150,24 @@ export function CodingFactoryIntake({
   };
 
   const handleManualAdd = () => {
-    const issue = Number(manualIssue);
-    if (!Number.isInteger(issue) || issue <= 0) {
-      return;
-    }
+    setManualTouched({ issue: true, repo: true });
 
-    const repo = manualRepo.trim();
-    if (!repo) {
-      return;
-    }
+    const issueNum = Number(manualIssue);
+    if (!Number.isInteger(issueNum) || issueNum <= 0) return;
+
+    const repo = (manualRepo.trim() || intake.targetRepo).trim();
+    if (!REPO_PATTERN.test(repo)) return;
 
     handleAddIssue({
-      issue,
+      issue: issueNum,
       repo,
-      title: manualTitle.trim() || `Issue #${issue}`,
+      title: manualTitle.trim() || `Issue #${issueNum}`,
     });
 
     setManualIssue("");
     setManualTitle("");
+    setManualRepo("");
+    setManualTouched({ issue: false, repo: false });
   };
 
   return (
@@ -183,17 +224,36 @@ export function CodingFactoryIntake({
 
           <div className="rounded-lg border border-stone-200 p-3 dark:border-[#2c343d]">
             <p className="text-xs font-semibold uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">
+              Target repo
+            </p>
+            <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-start">
+              <div className="relative flex-1">
+                <FolderGit2 className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-stone-400 dark:text-[#7a8591]" />
+                <Input
+                  value={intake.targetRepo}
+                  onChange={(event) => commit({ ...intake, targetRepo: event.target.value })}
+                  placeholder="owner/repo"
+                  className={cn("pl-9", targetRepoError && "border-red-300 dark:border-red-500/40")}
+                />
+                <InlineError message={targetRepoError} />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-stone-200 p-3 dark:border-[#2c343d]">
+            <p className="text-xs font-semibold uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">
               Base branch
             </p>
-            <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-start">
               <div className="relative flex-1">
                 <GitBranch className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-stone-400 dark:text-[#7a8591]" />
                 <Input
                   value={intake.baseBranch}
                   onChange={(event) => commit({ ...intake, baseBranch: event.target.value })}
                   placeholder="dev"
-                  className="pl-9"
+                  className={cn("pl-9", baseBranchError && "border-red-300 dark:border-red-500/40")}
                 />
+                <InlineError message={baseBranchError} />
               </div>
               <div className="flex flex-wrap gap-2">
                 {[
@@ -267,24 +327,40 @@ export function CodingFactoryIntake({
               Add issue manually
             </p>
             <div className="mt-3 space-y-3">
-              <Input
-                type="number"
-                min={1}
-                value={manualIssue}
-                onChange={(event) => setManualIssue(event.target.value)}
-                placeholder="Issue #"
-              />
-              <Input
-                value={manualRepo}
-                onChange={(event) => setManualRepo(event.target.value)}
-                placeholder="owner/repo"
-              />
+              <div>
+                <Input
+                  type="number"
+                  min={1}
+                  value={manualIssue}
+                  onChange={(event) => setManualIssue(event.target.value)}
+                  onBlur={() => setManualTouched((prev) => ({ ...prev, issue: true }))}
+                  placeholder="Issue #"
+                  className={cn(manualIssueError && "border-red-300 dark:border-red-500/40")}
+                />
+                <InlineError message={manualIssueError} />
+              </div>
+              <div>
+                <Input
+                  value={manualRepo}
+                  onChange={(event) => setManualRepo(event.target.value)}
+                  onBlur={() => setManualTouched((prev) => ({ ...prev, repo: true }))}
+                  placeholder={`Repo (defaults to ${intake.targetRepo})`}
+                  className={cn(manualRepoError && "border-red-300 dark:border-red-500/40")}
+                />
+                <InlineError message={manualRepoError} />
+              </div>
               <Input
                 value={manualTitle}
                 onChange={(event) => setManualTitle(event.target.value)}
                 placeholder="Optional title"
               />
-              <Button type="button" variant="outline" className="w-full" onClick={handleManualAdd}>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={handleManualAdd}
+                disabled={manualAddDisabled}
+              >
                 <Plus className="h-3.5 w-3.5" /> Add issue
               </Button>
             </div>
