@@ -529,19 +529,19 @@ export function resolveRunStateFromIssues(input: {
     return input.currentState === "completed" ? "completed" : "created";
   }
 
-  if (states.some((state) => state === "implementing" || state === "reviewing" || state === "fixing" || state === "approved" || state === "pr_created")) {
-    if (input.finishedAt) {
-      return "completed";
-    }
+  if (states.every((state) => state === "completed")) return "completed";
+
+  if (states.some((state) => state === "failed")) return "failed";
+  if (states.some((state) => state === "blocked")) return "blocked";
+  if (states.some((state) => state === "stuck")) return "stuck";
+
+  const hasActiveWork = states.some((state) => state === "implementing" || state === "reviewing" || state === "fixing" || state === "approved" || state === "pr_created");
+  if (hasActiveWork) {
     return "running";
   }
 
-  if (states.some((state) => state === "blocked")) return "blocked";
-  if (states.some((state) => state === "stuck")) return "stuck";
-  if (states.some((state) => state === "failed")) return "failed";
-  if (states.every((state) => state === "completed")) return "completed";
-  if (states.some((state) => state === "cancelled")) return "cancelled";
   if (states.some((state) => state === "planning" || state === "queued" || state === "created")) return "queued";
+  if (states.some((state) => state === "cancelled")) return "cancelled";
 
   return input.currentState;
 }
