@@ -24,6 +24,7 @@ import {
 export const WORK_STATE_DIR = process.env.WORK_STATE_DIR || "/home/ubuntu/repos/.work-state";
 export const CODING_FACTORY_INTAKE_PATH = join(WORK_STATE_DIR, "coding-factory-intake.json");
 export const CODING_FACTORY_RUN_PATH = join(WORK_STATE_DIR, "coding-factory-run.json");
+export const CODING_FACTORY_SUPERVISOR_PATH = join(WORK_STATE_DIR, "coding-factory-supervisor.json");
 export const NIGHT_MODE_STATE_PATH = join(WORK_STATE_DIR, "night-mode.json");
 export const TERMINAL_PHASES = new Set(["done", "pr-created", "blocked", "aborted", "failed"]);
 
@@ -114,6 +115,45 @@ export type CodingFactoryStats = {
   prsCreated: number;
 };
 
+export type CodingFactorySupervisorStatus = "absent" | "running" | "stale" | "finished" | "failed";
+
+export type CodingFactorySupervisorState = {
+  version: 1;
+  runId: string;
+  status: "running" | "finished" | "failed";
+  source: "start" | "resume";
+  pid: number | null;
+  targetRepo: string;
+  baseBranch: string;
+  issueKeys: string[];
+  issueNumbers: number[];
+  command: string[];
+  logPath: string;
+  startedAt: string;
+  finishedAt?: string;
+  exitCode?: number | null;
+  updatedAt: string;
+};
+
+export type CodingFactorySupervisorHealth = {
+  status: CodingFactorySupervisorStatus;
+  isHealthy: boolean;
+  pid: number | null;
+  pidAlive: boolean;
+  runId: string | null;
+  source: CodingFactorySupervisorState["source"] | null;
+  targetRepo: string | null;
+  baseBranch: string | null;
+  issueKeys: string[];
+  issueNumbers: number[];
+  logPath: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string | null;
+  fallbackNightModeProcess: boolean;
+  fallbackUsed: boolean;
+};
+
 export type CodingFactoryStatus = {
   isRunning: boolean;
   status: string;
@@ -126,6 +166,7 @@ export type CodingFactoryStatus = {
   run: CodingFactoryRunState;
   activeRun: CodingFactoryRunState;
   runSource: CodingFactoryRunSource;
+  supervisor: CodingFactorySupervisorHealth;
   stateMachine: {
     runStates: readonly CodingFactoryRunStateName[];
     issueStates: readonly CodingFactoryIssueStateName[];
@@ -795,12 +836,91 @@ export async function listAvailableIssues(options: ListAvailableIssuesOptions = 
     }));
 }
 
+const SUPERVISOR_STALE_MS = 5 * 60 * 1000;
+
+function isPidAlive(pid: number | null): boolean {
+  if (pid === null || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function deriveSupervisorStatus(
+  state: CodingFactorySupervisorState | null,
+  pidAlive: boolean,
+  nightModeRunning: boolean,
+): CodingFactorySupervisorStatus {
+  if (!state) return nightModeRunning ? "running" : "absent";
+  if (state.status === "failed") return "failed";
+  if (state.status === "finished") return "finished";
+  // status === "running"
+  if (pidAlive) return "running";
+  const age = Date.now() - new Date(state.updatedAt).getTime();
+  if (age > SUPERVISOR_STALE_MS) return "stale";
+  return "running";
+}
+
+async function readSupervisorHealth(): Promise<CodingFactorySupervisorHealth> {
+  const [state, nightModeRunning] = await Promise.all([
+    readJson<CodingFactorySupervisorState>(CODING_FACTORY_SUPERVISOR_PATH),
+    checkNightModeProcessRunning(),
+  ]);
+
+  const pidAlive = isPidAlive(state?.pid ?? null);
+  const status = deriveSupervisorStatus(state, pidAlive, nightModeRunning);
+  const isHealthy = status === "running";
+
+  if (!state) {
+    return {
+      status,
+      isHealthy,
+      pid: null,
+      pidAlive: false,
+      runId: null,
+      source: null,
+      targetRepo: null,
+      baseBranch: null,
+      issueKeys: [],
+      issueNumbers: [],
+      logPath: null,
+      startedAt: null,
+      finishedAt: null,
+      updatedAt: null,
+      fallbackNightModeProcess: nightModeRunning,
+      fallbackUsed: nightModeRunning,
+    };
+  }
+
+  return {
+    status,
+    isHealthy,
+    pid: state.pid,
+    pidAlive,
+    runId: state.runId,
+    source: state.source,
+    targetRepo: state.targetRepo,
+    baseBranch: state.baseBranch,
+    issueKeys: state.issueKeys,
+    issueNumbers: state.issueNumbers,
+    logPath: state.logPath,
+    startedAt: state.startedAt,
+    finishedAt: state.finishedAt ?? null,
+    updatedAt: state.updatedAt,
+    fallbackNightModeProcess: nightModeRunning,
+    fallbackUsed: false,
+  };
+}
+
 export async function getCodingFactoryStatus(): Promise<CodingFactoryStatus> {
-  const [nightMode, isRunning, allIssues, intake] = await Promise.all([
+  const [nightMode, isRunning, allIssues, intake, supervisor] = await Promise.all([
     readJson<NightModeState>(NIGHT_MODE_STATE_PATH),
     checkNightModeProcessRunning(),
     readIssueStates(),
     readIntakeState(),
+    readSupervisorHealth(),
   ]);
 
   const { run, activeRun, runSource } = await resolveRunState(intake, nightMode, isRunning, allIssues);
@@ -818,6 +938,7 @@ export async function getCodingFactoryStatus(): Promise<CodingFactoryStatus> {
     run,
     activeRun,
     runSource,
+    supervisor,
     stateMachine: {
       runStates: RUN_STATES,
       issueStates: ISSUE_STATES,
