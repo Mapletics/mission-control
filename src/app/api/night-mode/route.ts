@@ -6,7 +6,13 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const status = await getCodingFactoryStatus();
-    return NextResponse.json(apiOk(status));
+    return NextResponse.json(apiOk({
+      ...status,
+      meta: {
+        stateMachineVersion: 1,
+        canonicalRunState: status.state,
+      },
+    }));
   } catch (err) {
     return NextResponse.json(apiError(String(err)), { status: 500 });
   }
