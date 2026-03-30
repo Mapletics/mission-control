@@ -7,27 +7,53 @@ export const dynamic = "force-dynamic";
 const ISSUE_LOG_DIR = process.env.ISSUE_LOG_DIR || "/tmp";
 const MAX_LINES = 200;
 
+function parseIssueNumber(value: string | null): number | null {
+  if (!value) return null;
+  if (/^\d+$/.test(value)) return Number(value);
+
+  const match = value.match(/#(\d+)$/);
+  return match ? Number(match[1]) : null;
+}
+
+function sanitizeIssueKey(issueKey: string): string {
+  return issueKey.replace(/[^A-Za-z0-9_.#-]+/g, "-");
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const issue = searchParams.get("issue");
+  const issueParam = searchParams.get("issue");
+  const issueKey = searchParams.get("issueKey")?.trim() || "";
+  const issueNumber = parseIssueNumber(issueParam) ?? parseIssueNumber(issueKey);
 
-  if (!issue || !/^\d+$/.test(issue)) {
-    return NextResponse.json({ error: "issue parameter required (numeric)" }, { status: 400 });
+  if (!issueNumber) {
+    return NextResponse.json({ error: "issue or issueKey parameter required" }, { status: 400 });
   }
 
-  const logPath = join(ISSUE_LOG_DIR, `claude-issue-${issue}.log`);
+  const candidates = [
+    issueKey ? join(ISSUE_LOG_DIR, `claude-${sanitizeIssueKey(issueKey)}.log`) : null,
+    join(ISSUE_LOG_DIR, `claude-issue-${issueNumber}.log`),
+  ].filter((value): value is string => !!value);
 
-  try {
-    await stat(logPath);
-  } catch {
-    return NextResponse.json({ issue: Number(issue), lines: [], exists: false });
+  let logPath: string | null = null;
+  for (const candidate of candidates) {
+    try {
+      await stat(candidate);
+      logPath = candidate;
+      break;
+    } catch {
+      // try next candidate
+    }
+  }
+
+  if (!logPath) {
+    return NextResponse.json({ issue: issueNumber, issueKey: issueKey || null, lines: [], exists: false });
   }
 
   try {
     const content = await readFile(logPath, "utf-8");
     const allLines = content.split("\n");
     const lines = allLines.slice(-MAX_LINES);
-    return NextResponse.json({ issue: Number(issue), lines, exists: true });
+    return NextResponse.json({ issue: issueNumber, issueKey: issueKey || null, lines, exists: true });
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }

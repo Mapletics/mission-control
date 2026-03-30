@@ -75,14 +75,15 @@ function setSnapshot(next: Partial<Snapshot>) {
   emit();
 }
 
-/** Lightweight poll via /api/status — 3s max, used for normal ticks. */
+/** Lightweight poll via /api/gateway — more reliable than /api/status on proxied deployments. */
 async function pollLite() {
   if (liteInFlight || typeof window === "undefined" || tabHidden) return;
   liteInFlight = true;
   try {
-    const res = await fetch("/api/status", {
+    const startedAt = Date.now();
+    const res = await fetch("/api/gateway", {
       cache: "no-store",
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) {
       setSnapshot({ status: "offline", health: null, latencyMs: null });
@@ -90,24 +91,14 @@ async function pollLite() {
       return;
     }
     const data = await res.json();
-    const nextStatus = toGatewayStatus(data.gateway);
+    const nextStatus = toGatewayStatus(data.status);
     setSnapshot({
       status: nextStatus,
-      latencyMs: typeof data.latencyMs === "number" ? data.latencyMs : null,
-      transport: typeof data.transport === "string" ? data.transport : null,
-      transportConfigured:
-        data.transportConfigured === "auto" ||
-        data.transportConfigured === "cli" ||
-        data.transportConfigured === "http"
-          ? data.transportConfigured
-          : null,
-      transportReason:
-        data.transportReason === "forced_cli" ||
-        data.transportReason === "forced_http" ||
-        data.transportReason === "auto_http" ||
-        data.transportReason === "auto_fallback_cli"
-          ? data.transportReason
-          : null,
+      health: (data.health as GatewayHealth) || null,
+      latencyMs: Date.now() - startedAt,
+      transport: null,
+      transportConfigured: null,
+      transportReason: null,
     });
     if (fastPollCount > 0) {
       // During restart recovery, keep fast polling until we confirm gateway is back.

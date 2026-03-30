@@ -54,10 +54,11 @@ async function checkGatewayHealth(): Promise<{
 }> {
   const start = Date.now();
   try {
-    const gwUrl = await getGatewayUrl();
+    const gatewayUrl = await getGatewayUrl();
+    const healthUrl = new URL("/health", gatewayUrl).toString();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(`${gwUrl}/`, {
+    const res = await fetch(healthUrl, {
       signal: controller.signal,
     });
     clearTimeout(timeout);

@@ -49,7 +49,8 @@ async function checkGatewayHealth(
   gatewayUrl: string,
 ): Promise<{ running: boolean; version?: string }> {
   try {
-    const res = await fetch(gatewayUrl, {
+    const healthUrl = new URL("/health", gatewayUrl).toString();
+    const res = await fetch(healthUrl, {
       signal: AbortSignal.timeout(4000),
     });
     if (!res.ok) return { running: false };

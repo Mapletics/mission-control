@@ -33,6 +33,7 @@ type IssueHistory = {
 
 type Issue = {
   issue: number;
+  issueKey: string;
   title: string;
   repo: string;
   branch: string;
@@ -45,6 +46,20 @@ type Issue = {
   updatedAt: string;
   duration?: number | null;
   history: IssueHistory[];
+};
+
+type RunState = {
+  runId: string;
+  mode: "single" | "batch";
+  targetRepo: string;
+  baseBranch: string;
+  selectedIssues: Array<{
+    issue: number;
+    issueKey: string;
+    repo: string;
+    title: string;
+  }>;
+  status: string;
 };
 
 type CodingFactoryData = {
@@ -64,6 +79,9 @@ type CodingFactoryData = {
   };
   intake: IntakeState;
   availableIssues: AvailableIssue[];
+  run: RunState;
+  activeRun: RunState;
+  runSource: "draft" | "persisted" | "legacy-bridge";
 };
 
 /* ── Constants ── */
@@ -136,7 +154,7 @@ function computeProgress(issue: Issue): number {
 
 /* ── Log Panel ── */
 
-function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
+function LogPanel({ issue, onClose }: { issue: Pick<Issue, "issue" | "issueKey">; onClose: () => void }) {
   const [lines, setLines] = useState<string[]>([]);
   const [exists, setExists] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -144,7 +162,11 @@ function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
 
   const fetchLogs = useCallback(async () => {
     try {
-      const response = await fetch(`/api/night-mode/logs?issue=${issue}`, {
+      const params = new URLSearchParams({
+        issue: String(issue.issue),
+        issueKey: issue.issueKey,
+      });
+      const response = await fetch(`/api/night-mode/logs?${params.toString()}`, {
         cache: "no-store",
         signal: AbortSignal.timeout(10000),
       });
@@ -161,7 +183,7 @@ function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
       // ignore log polling errors in the overlay
     }
     setLoading(false);
-  }, [issue]);
+  }, [issue.issue, issue.issueKey]);
 
   useSmartPoll(fetchLogs, { intervalMs: 10_000 });
 
@@ -172,7 +194,7 @@ function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
           <div className="flex items-center gap-2">
             <FileText className="h-4 w-4 text-stone-500 dark:text-[#8d98a5]" />
             <span className="text-sm font-semibold text-stone-900 dark:text-[#f5f7fa]">
-              Log — Issue #{issue}
+              Log — {issue.issueKey}
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -204,7 +226,7 @@ function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
             <div className="flex items-center justify-center py-12 text-stone-500">Loading...</div>
           ) : !exists ? (
             <div className="flex items-center justify-center py-12 text-stone-500">
-              No log file found for issue #{issue}
+              No log file found for {issue.issueKey}
             </div>
           ) : lines.length === 0 ? (
             <div className="flex items-center justify-center py-12 text-stone-500">Log is empty</div>
@@ -223,7 +245,7 @@ function LogPanel({ issue, onClose }: { issue: number; onClose: () => void }) {
 
 /* ── Issue Card ── */
 
-function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issueNumber: number) => void }) {
+function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issue: Pick<Issue, "issue" | "issueKey">) => void }) {
   const [expanded, setExpanded] = useState(false);
   const progress = computeProgress(issue);
   const phaseColor = PHASE_COLORS[issue.phase] || PHASE_COLORS.aborted;
@@ -248,7 +270,7 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issueNumber
             )}
           </div>
           <p className="mt-1 text-sm text-stone-700 dark:text-[#c7d0d9]">{issue.title}</p>
-          <p className="mt-0.5 text-xs text-stone-400 dark:text-[#7a8591]">{issue.repo}</p>
+          <p className="mt-0.5 text-xs text-stone-400 dark:text-[#7a8591]">{issue.issueKey}</p>
           <div className="mt-2 flex flex-wrap gap-2 text-xs text-stone-500 dark:text-[#8d98a5]">
             <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 dark:bg-[#20252a]">
               <GitBranch className="h-3 w-3" /> branch {issue.branch}
@@ -275,7 +297,7 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issueNumber
           )}
           <button
             type="button"
-            onClick={() => onViewLog(issue.issue)}
+            onClick={() => onViewLog({ issue: issue.issue, issueKey: issue.issueKey })}
             className="flex items-center gap-1 rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-xs font-medium text-stone-600 transition-colors hover:bg-stone-50 hover:text-stone-900 dark:border-[#2c343d] dark:bg-[#171a1d] dark:text-[#c7d0d9] dark:hover:bg-[#20252a] dark:hover:text-[#f5f7fa]"
           >
             <FileText className="h-3 w-3" /> Log
@@ -351,10 +373,9 @@ export function NightModeView({ legacy }: { legacy?: boolean }) {
   const [refreshing, setRefreshing] = useState(false);
   const [savingIntake, setSavingIntake] = useState(false);
   const [intakeError, setIntakeError] = useState<string | null>(null);
-  const [logIssue, setLogIssue] = useState<number | null>(null);
+  const [logIssue, setLogIssue] = useState<Pick<Issue, "issue" | "issueKey"> | null>(null);
   const hasLoadedOnce = useRef(false);
 
-  // Debounce save: keep a pending state ref and a timer
   const pendingIntakeRef = useRef<IntakeState | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savingRef = useRef(false);
@@ -405,7 +426,6 @@ export function NightModeView({ legacy }: { legacy?: boolean }) {
       const envelope = await response.json();
       const saved = envelope.ok ? envelope.data : envelope;
 
-      // If another write came in while we were saving, don't overwrite optimistic state
       if (!pendingIntakeRef.current) {
         setData((current) => (current ? { ...current, intake: saved } : current));
       }
@@ -417,7 +437,6 @@ export function NightModeView({ legacy }: { legacy?: boolean }) {
     setSavingIntake(false);
     savingRef.current = false;
 
-    // If a newer state was queued while we were saving, flush it now
     const queued = pendingIntakeRef.current;
     if (queued) {
       pendingIntakeRef.current = null;
@@ -426,16 +445,13 @@ export function NightModeView({ legacy }: { legacy?: boolean }) {
   }, [fetchData]);
 
   const saveIntake = useCallback((nextIntake: IntakeState) => {
-    // Optimistically update the UI immediately
     setData((current) => (current ? { ...current, intake: nextIntake } : current));
 
-    // If a save is in flight, queue the latest state — last-write-wins
     if (savingRef.current) {
       pendingIntakeRef.current = nextIntake;
       return;
     }
 
-    // Debounce: clear previous timer, set a new one
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
     }
@@ -445,7 +461,6 @@ export function NightModeView({ legacy }: { legacy?: boolean }) {
     }, SAVE_DEBOUNCE_MS);
   }, [flushIntakeSave]);
 
-  // Cleanup debounce timer on unmount
   useEffect(() => {
     return () => {
       if (saveTimerRef.current) {
@@ -473,7 +488,7 @@ export function NightModeView({ legacy }: { legacy?: boolean }) {
             Coding Factory
           </span>
         }
-        description="Dashboard-driven issue automation built on the existing Night Mode run engine"
+        description="Dashboard-driven issue automation with explicit v1 draft/run state on top of the existing Night Mode engine"
         actions={
           <button
             type="button"
@@ -539,15 +554,21 @@ export function NightModeView({ legacy }: { legacy?: boolean }) {
               integrationBranch={data.integrationBranch}
               startedAt={data.startedAt}
               stats={data.stats}
+              run={data.run}
+              activeRun={data.activeRun}
+              runSource={data.runSource}
             />
 
             {data.issues.length === 0 ? (
-              <div className="flex items-center justify-center rounded-xl border border-dashed border-stone-200 py-12 text-sm text-stone-500 dark:border-[#2c343d] dark:text-[#8d98a5]">
-                No issues in the active runtime pipeline
+              <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-stone-200 py-12 text-sm text-stone-500 dark:border-[#2c343d] dark:text-[#8d98a5]">
+                <p>No active issues in the current Coding Factory run.</p>
+                <p className="mt-1 text-xs text-stone-400 dark:text-[#7a8591]">
+                  Historical issue state files stay visible above in the intake picker and are no longer used as an implicit active fallback.
+                </p>
               </div>
             ) : (
               data.issues.map((issue) => (
-                <IssueCard key={issue.issue} issue={issue} onViewLog={setLogIssue} />
+                <IssueCard key={issue.issueKey} issue={issue} onViewLog={setLogIssue} />
               ))
             )}
           </>

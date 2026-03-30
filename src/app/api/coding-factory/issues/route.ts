@@ -1,13 +1,22 @@
 import { NextResponse } from "next/server";
-import { listAvailableIssues } from "@/lib/coding-factory";
+import { getCodingFactoryStatus, listAvailableIssues, readIntakeState, apiOk, apiError } from "@/lib/coding-factory";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const items = await listAvailableIssues();
-    return NextResponse.json({ items });
+    const [status, intake] = await Promise.all([
+      getCodingFactoryStatus(),
+      readIntakeState(),
+    ]);
+
+    const items = await listAvailableIssues({
+      targetRepo: intake.targetRepo,
+      excludeIssueKeys: status.activeRun.selectedIssues.map((issue) => issue.issueKey),
+    });
+
+    return NextResponse.json(apiOk({ items }));
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json(apiError(String(err)), { status: 500 });
   }
 }

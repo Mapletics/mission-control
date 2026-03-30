@@ -12,6 +12,7 @@ export type CodingFactoryMode = "single" | "batch";
 export type IntakeIssue = {
   issue: number;
   repo: string;
+  issueKey: string;
   title: string;
 };
 
@@ -60,6 +61,10 @@ function validateIssueNumber(value: string): string | null {
   return null;
 }
 
+function buildIssueKey(repo: string, issue: number): string {
+  return `${repo}#${issue}`;
+}
+
 function formatUpdatedAt(iso: string) {
   return new Date(iso).toLocaleString([], {
     month: "short",
@@ -82,30 +87,24 @@ export function CodingFactoryIntake({
   onSave,
 }: CodingFactoryIntakeProps) {
   const [manualIssue, setManualIssue] = useState("");
-  const [manualRepo, setManualRepo] = useState("");
   const [manualTitle, setManualTitle] = useState("");
-  const [manualTouched, setManualTouched] = useState({ issue: false, repo: false });
+  const [manualTouched, setManualTouched] = useState({ issue: false });
+  const [repoChangeNotice, setRepoChangeNotice] = useState<string | null>(null);
 
   const selectedKeys = useMemo(
-    () => new Set(intake.selectedIssues.map((item) => `${item.repo}#${item.issue}`)),
+    () => new Set(intake.selectedIssues.map((item) => item.issueKey)),
     [intake.selectedIssues],
   );
 
   const remainingIssues = useMemo(
-    () => availableIssues.filter((item) => !selectedKeys.has(`${item.repo}#${item.issue}`)),
+    () => availableIssues.filter((item) => !selectedKeys.has(item.issueKey)),
     [availableIssues, selectedKeys],
   );
 
-  // Validation for top-level fields
   const targetRepoError = validateRepo(intake.targetRepo);
   const baseBranchError = validateBranch(intake.baseBranch);
-
-  // Validation for manual add form
   const manualIssueError = manualTouched.issue ? validateIssueNumber(manualIssue) : null;
-  const manualRepoError = manualTouched.repo ? validateRepo(manualRepo || intake.targetRepo) : null;
-  const manualAddDisabled =
-    !!validateIssueNumber(manualIssue) ||
-    !!validateRepo(manualRepo || intake.targetRepo);
+  const manualAddDisabled = !!validateIssueNumber(manualIssue) || !!targetRepoError;
 
   const commit = (nextState: IntakeState) => {
     onSave({
@@ -128,11 +127,39 @@ export function CodingFactoryIntake({
     });
   };
 
+  const handleTargetRepoChange = (targetRepo: string) => {
+    const trimmedTargetRepo = targetRepo.trim();
+    const shouldClearIssues =
+      trimmedTargetRepo !== intake.targetRepo.trim() &&
+      intake.selectedIssues.some((issue) => issue.repo !== trimmedTargetRepo || trimmedTargetRepo.length > 0);
+
+    if (shouldClearIssues) {
+      setRepoChangeNotice("Prepared issues were cleared to keep the draft scoped to exactly one repo.");
+    } else {
+      setRepoChangeNotice(null);
+    }
+
+    commit({
+      ...intake,
+      targetRepo,
+      selectedIssues: shouldClearIssues ? [] : intake.selectedIssues,
+    });
+  };
+
   const handleAddIssue = (issue: IntakeIssue) => {
+    const normalizedIssue = {
+      ...issue,
+      repo: intake.targetRepo,
+      issueKey: buildIssueKey(intake.targetRepo, issue.issue),
+    } satisfies IntakeIssue;
+
     const selectedIssues =
       intake.mode === "single"
-        ? [issue]
-        : [...intake.selectedIssues.filter((item) => !(item.issue === issue.issue && item.repo === issue.repo)), issue];
+        ? [normalizedIssue]
+        : [
+            ...intake.selectedIssues.filter((item) => item.issueKey !== normalizedIssue.issueKey),
+            normalizedIssue,
+          ];
 
     commit({
       ...intake,
@@ -143,31 +170,27 @@ export function CodingFactoryIntake({
   const handleRemoveIssue = (issue: IntakeIssue) => {
     commit({
       ...intake,
-      selectedIssues: intake.selectedIssues.filter(
-        (item) => !(item.issue === issue.issue && item.repo === issue.repo),
-      ),
+      selectedIssues: intake.selectedIssues.filter((item) => item.issueKey !== issue.issueKey),
     });
   };
 
   const handleManualAdd = () => {
-    setManualTouched({ issue: true, repo: true });
+    setManualTouched({ issue: true });
 
     const issueNum = Number(manualIssue);
     if (!Number.isInteger(issueNum) || issueNum <= 0) return;
-
-    const repo = (manualRepo.trim() || intake.targetRepo).trim();
-    if (!REPO_PATTERN.test(repo)) return;
+    if (!REPO_PATTERN.test(intake.targetRepo.trim())) return;
 
     handleAddIssue({
       issue: issueNum,
-      repo,
+      repo: intake.targetRepo,
+      issueKey: buildIssueKey(intake.targetRepo, issueNum),
       title: manualTitle.trim() || `Issue #${issueNum}`,
     });
 
     setManualIssue("");
     setManualTitle("");
-    setManualRepo("");
-    setManualTouched({ issue: false, repo: false });
+    setManualTouched({ issue: false });
   };
 
   return (
@@ -176,7 +199,7 @@ export function CodingFactoryIntake({
         <div>
           <h2 className="text-sm font-semibold text-stone-900 dark:text-[#f5f7fa]">Intake</h2>
           <p className="mt-1 text-sm text-stone-500 dark:text-[#8d98a5]">
-            Prepare issues, target repo, base branch, and execution mode before Paket 3 adds the real trigger.
+            Prepare a single-repo draft: target repo, base branch, and issue set before Paket 3 adds the real trigger.
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs text-stone-500 dark:text-[#8d98a5]">
@@ -194,7 +217,7 @@ export function CodingFactoryIntake({
                   Mode
                 </p>
                 <p className="mt-1 text-sm text-stone-600 dark:text-[#c7d0d9]">
-                  Single keeps one prepared issue. Batch keeps a list for later orchestration.
+                  Single keeps one prepared issue. Batch keeps a list for later orchestration inside the same repo.
                 </p>
               </div>
               <div className="flex items-center gap-2 rounded-lg bg-stone-100 p-1 dark:bg-[#20252a]">
@@ -215,11 +238,6 @@ export function CodingFactoryIntake({
                 ))}
               </div>
             </div>
-            {intake.mode === "single" && intake.selectedIssues.length > 1 && (
-              <p className="mt-2 text-xs text-amber-600 dark:text-amber-300">
-                Single mode keeps only the first selected issue.
-              </p>
-            )}
           </div>
 
           <div className="rounded-lg border border-stone-200 p-3 dark:border-[#2c343d]">
@@ -231,13 +249,19 @@ export function CodingFactoryIntake({
                 <FolderGit2 className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-stone-400 dark:text-[#7a8591]" />
                 <Input
                   value={intake.targetRepo}
-                  onChange={(event) => commit({ ...intake, targetRepo: event.target.value })}
+                  onChange={(event) => handleTargetRepoChange(event.target.value)}
                   placeholder="owner/repo"
                   className={cn("pl-9", targetRepoError && "border-red-300 dark:border-red-500/40")}
                 />
                 <InlineError message={targetRepoError} />
               </div>
             </div>
+            <p className="mt-2 text-xs text-stone-500 dark:text-[#8d98a5]">
+              V1 rule: one Coding Factory draft/run may only contain issues from this repo.
+            </p>
+            {repoChangeNotice && (
+              <p className="mt-2 text-xs text-amber-600 dark:text-amber-300">{repoChangeNotice}</p>
+            )}
           </div>
 
           <div className="rounded-lg border border-stone-200 p-3 dark:border-[#2c343d]">
@@ -283,7 +307,7 @@ export function CodingFactoryIntake({
                 <p className="mt-1 text-sm text-stone-600 dark:text-[#c7d0d9]">
                   {intake.selectedIssues.length === 0
                     ? "No issues prepared yet."
-                    : `${intake.selectedIssues.length} issue${intake.selectedIssues.length === 1 ? "" : "s"} queued in the intake draft.`}
+                    : `${intake.selectedIssues.length} issue${intake.selectedIssues.length === 1 ? "" : "s"} queued for ${intake.targetRepo}.`}
                 </p>
               </div>
               <Badge variant="outline">{intake.mode}</Badge>
@@ -297,7 +321,7 @@ export function CodingFactoryIntake({
               ) : (
                 intake.selectedIssues.map((issue) => (
                   <div
-                    key={`${issue.repo}#${issue.issue}`}
+                    key={issue.issueKey}
                     className="flex flex-col gap-3 rounded-lg border border-stone-200 px-3 py-3 dark:border-[#2c343d] sm:flex-row sm:items-center sm:justify-between"
                   >
                     <div className="min-w-0 flex-1">
@@ -310,6 +334,7 @@ export function CodingFactoryIntake({
                       <p className="mt-1 truncate text-sm text-stone-600 dark:text-[#c7d0d9]">
                         {issue.title}
                       </p>
+                      <p className="mt-1 text-xs text-stone-400 dark:text-[#7a8591]">{issue.issueKey}</p>
                     </div>
                     <Button type="button" variant="outline" size="sm" onClick={() => handleRemoveIssue(issue)}>
                       <Trash2 className="h-3.5 w-3.5" /> Remove
@@ -339,21 +364,14 @@ export function CodingFactoryIntake({
                 />
                 <InlineError message={manualIssueError} />
               </div>
-              <div>
-                <Input
-                  value={manualRepo}
-                  onChange={(event) => setManualRepo(event.target.value)}
-                  onBlur={() => setManualTouched((prev) => ({ ...prev, repo: true }))}
-                  placeholder={`Repo (defaults to ${intake.targetRepo})`}
-                  className={cn(manualRepoError && "border-red-300 dark:border-red-500/40")}
-                />
-                <InlineError message={manualRepoError} />
-              </div>
               <Input
                 value={manualTitle}
                 onChange={(event) => setManualTitle(event.target.value)}
                 placeholder="Optional title"
               />
+              <p className="text-xs text-stone-500 dark:text-[#8d98a5]">
+                Manual issues are always added to <strong>{intake.targetRepo || "the selected repo"}</strong>.
+              </p>
               <Button
                 type="button"
                 variant="outline"
@@ -368,20 +386,25 @@ export function CodingFactoryIntake({
 
           <div className="rounded-lg border border-stone-200 p-3 dark:border-[#2c343d]">
             <div className="flex items-center justify-between gap-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">
-                Known issues
-              </p>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">
+                  Known issues
+                </p>
+                <p className="mt-1 text-xs text-stone-500 dark:text-[#8d98a5]">
+                  Historical issue state files for {intake.targetRepo}. Active run issues are shown below separately.
+                </p>
+              </div>
               <Badge variant="outline">{remainingIssues.length}</Badge>
             </div>
             <div className="mt-3 space-y-2">
               {remainingIssues.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-stone-200 px-3 py-4 text-sm text-stone-500 dark:border-[#2c343d] dark:text-[#8d98a5]">
-                  No additional issues available from the current state files.
+                  No additional issues available from historical state files for this repo.
                 </div>
               ) : (
                 remainingIssues.slice(0, 8).map((issue) => (
                   <button
-                    key={`${issue.repo}#${issue.issue}`}
+                    key={issue.issueKey}
                     type="button"
                     onClick={() => handleAddIssue(issue)}
                     className="w-full rounded-lg border border-stone-200 px-3 py-3 text-left transition-colors hover:bg-stone-50 dark:border-[#2c343d] dark:hover:bg-[#20252a]"
@@ -398,7 +421,7 @@ export function CodingFactoryIntake({
                           {issue.title}
                         </p>
                         <p className="mt-2 text-xs text-stone-500 dark:text-[#8d98a5]">
-                          phase {issue.phase} • base {issue.baseBranch} • updated {formatUpdatedAt(issue.updatedAt)}
+                          {issue.issueKey} • phase {issue.phase} • base {issue.baseBranch} • updated {formatUpdatedAt(issue.updatedAt)}
                         </p>
                       </div>
                       <Plus className="mt-0.5 h-4 w-4 shrink-0 text-stone-400 dark:text-[#7a8591]" />

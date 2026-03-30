@@ -35,8 +35,8 @@ export async function GET() {
   }
 
   try {
-    const url = await getGatewayUrl();
-    const port = parseInt(new URL(url).port, 10) || 18789;
+    const gatewayUrl = await getGatewayUrl();
+    const port = parseInt(new URL(gatewayUrl).port, 10) || 18789;
     const configuredRaw = (process.env.OPENCLAW_TRANSPORT || "auto").toLowerCase();
     const transportConfigured =
       configuredRaw === "cli" || configuredRaw === "http" ? configuredRaw : "auto";
@@ -51,8 +51,10 @@ export async function GET() {
     let gateway: "online" | "offline" | "degraded" = "offline";
 
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
-      gateway = res.ok ? "online" : "degraded";
+      const health = await fetch(new URL("/api/gateway", "http://127.0.0.1:3333").toString(), {
+        signal: AbortSignal.timeout(9000),
+      }).then((r) => (r.ok ? r.json() : null));
+      gateway = health?.status === "online" ? "online" : health?.status === "degraded" ? "degraded" : "offline";
     } catch {
       // unreachable — gateway stays "offline"
     }

@@ -107,15 +107,14 @@ async function probeGatewayHttp(): Promise<{
   port: number;
   url: string;
 }> {
-  const url = await getGatewayUrl();
-  const port = parseInt(new URL(url).port, 10) || 18789;
+  const gatewayUrl = await getGatewayUrl();
+  const port = parseInt(new URL(gatewayUrl).port, 10) || 18789;
   try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(3000),
-    });
-    return { ok: res.ok, port, url };
+    // Prefer the real RPC health path over brittle raw HTTP liveness checks.
+    const health = await gatewayCall<Record<string, unknown>>("health", {}, 8000);
+    return { ok: (health as { ok?: unknown })?.ok === true, port, url: gatewayUrl };
   } catch {
-    return { ok: false, port, url };
+    return { ok: false, port, url: gatewayUrl };
   }
 }
 

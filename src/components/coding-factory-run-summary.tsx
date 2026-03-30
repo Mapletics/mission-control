@@ -13,12 +13,24 @@ type CodingFactoryStats = {
   prsCreated: number;
 };
 
+type RunState = {
+  runId: string;
+  mode: "single" | "batch";
+  targetRepo: string;
+  baseBranch: string;
+  selectedIssues: Array<{ issueKey: string }>;
+  status: string;
+};
+
 type CodingFactoryRunSummaryProps = {
   isRunning: boolean;
   status: string;
   integrationBranch: string | null;
   startedAt: string | null;
   stats: CodingFactoryStats;
+  run: RunState;
+  activeRun: RunState;
+  runSource: "draft" | "persisted" | "legacy-bridge";
 };
 
 function formatElapsed(startedAt: string): string {
@@ -40,7 +52,24 @@ export function CodingFactoryRunSummary({
   integrationBranch,
   startedAt,
   stats,
+  run,
+  activeRun,
+  runSource,
 }: CodingFactoryRunSummaryProps) {
+  const summaryRun = activeRun;
+  const statusLabel = isRunning ? status : summaryRun.status;
+  const heading = isRunning
+    ? runSource === "legacy-bridge"
+      ? "Active legacy-bridged run"
+      : "Active factory run"
+    : run.status === "draft" || run.status === "idle"
+      ? "Prepared factory draft"
+      : "Last persisted factory run";
+
+  const description = runSource === "legacy-bridge"
+    ? "Legacy Night Mode is active. This panel mirrors the legacy issue set for display only; coding-factory-run.json is left untouched on polling."
+    : "Coding Factory keeps the persisted run record separate from the intake draft and only uses issueKey-scoped issue selection.";
+
   return (
     <section className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm dark:border-[#2c343d] dark:bg-[#171a1d]">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -57,10 +86,10 @@ export function CodingFactoryRunSummary({
           </span>
           <div>
             <p className="text-sm font-semibold text-stone-900 dark:text-[#f5f7fa]">
-              {isRunning ? "Active factory run" : "Run engine idle"}
+              {heading}
             </p>
             <p className="mt-1 text-sm text-stone-500 dark:text-[#8d98a5]">
-              The intake above is editable. The runtime view below still reflects the current Night Mode engine.
+              {description}
             </p>
           </div>
         </div>
@@ -68,19 +97,39 @@ export function CodingFactoryRunSummary({
         <span
           className={cn(
             "rounded-full px-2.5 py-1 text-xs font-medium",
-            status === "running"
+            statusLabel === "running"
               ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
-              : "bg-stone-100 text-stone-600 dark:bg-stone-700/60 dark:text-stone-300",
+              : statusLabel === "draft"
+                ? "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300"
+                : "bg-stone-100 text-stone-600 dark:bg-stone-700/60 dark:text-stone-300",
           )}
         >
-          {status}
+          {statusLabel}
         </span>
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-stone-500 dark:text-[#8d98a5]">
+        <span className="flex items-center gap-1">
+          <ExternalLink className="h-3 w-3" /> persisted {run.runId}
+        </span>
+        <span className="flex items-center gap-1">
+          <CircleDot className="h-3 w-3" /> source {runSource}
+        </span>
+        <span className="flex items-center gap-1">
+          <ExternalLink className="h-3 w-3" /> repo {summaryRun.targetRepo}
+        </span>
+        <span className="flex items-center gap-1">
+          <GitBranch className="h-3 w-3" /> base {summaryRun.baseBranch}
+        </span>
+        <span className="flex items-center gap-1">
+          <CircleDot className="h-3 w-3" /> {summaryRun.mode}
+        </span>
+        <span className="flex items-center gap-1">
+          <CircleDot className="h-3 w-3" /> {summaryRun.selectedIssues.length} selected
+        </span>
         {integrationBranch && (
           <span className="flex items-center gap-1">
-            <GitBranch className="h-3 w-3" /> {integrationBranch}
+            <GitBranch className="h-3 w-3" /> legacy integration {integrationBranch}
           </span>
         )}
         {startedAt && (

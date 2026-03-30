@@ -29,9 +29,10 @@ type GatewayHealthPayload = {
  * explicit user-initiated scans.
  */
 async function probeGatewayLiveness(): Promise<boolean> {
-  const url = await getGatewayUrl();
+  const gatewayUrl = await getGatewayUrl();
+  const healthUrl = new URL("/health", gatewayUrl).toString();
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    const res = await fetch(healthUrl, { signal: AbortSignal.timeout(3000) });
     return res.ok;
   } catch {
     return false;
