@@ -1,396 +1,276 @@
-/**
- * Coding Factory Launcher — hardened start / resume / supervisor layer.
- *
- * Owns:
- *  - Pre-launch validation (repo, branch, issues, no conflicting run)
- *  - Resume eligibility checks (exact identity match, no ambiguity)
- *  - Supervisor state persistence (attach/detach/heartbeat)
- *
- * Does NOT own the night-mode engine itself — that remains external.
- * Legacy bridge is read-only; this module never mutates night-mode.json.
- */
-
+import { openSync } from "fs";
+import { access, mkdir } from "fs/promises";
+import { spawn } from "child_process";
+import { join } from "path";
 import {
   CODING_FACTORY_SUPERVISOR_PATH,
-  readJson,
-  writeJson,
-  readRunState,
-  saveRunState,
-  readIssueStates,
-  selectIssuesByKey,
-  checkNightModeProcessRunning,
+  DEFAULT_TARGET_REPO,
   createDraftRunState,
-  type CodingFactoryRunState,
+  readIssueStates,
+  readRunState,
+  readSupervisorHealth,
+  readSupervisorState,
+  saveRunState,
+  selectIssuesByKey,
+  writeJson,
   type CodingFactoryIntakeState,
+  type CodingFactoryMode,
+  type CodingFactoryRunState,
   type CodingFactorySupervisorState,
   type IssueRef,
 } from "@/lib/coding-factory";
-import {
-  isTerminalRunState,
-  isTerminalIssueState,
-  applyRunTransition,
-} from "@/lib/coding-factory-state-machine";
-
-/* ── Types ── */
-
-export type LaunchRequest = {
-  targetRepo: string;
-  baseBranch: string;
-  mode: "single" | "batch";
-  selectedIssues: IssueRef[];
-};
-
-export type ResumeRequest = {
-  runId: string;
-  targetRepo: string;
-  baseBranch: string;
-  selectedIssues: IssueRef[];
-};
-
-export type LaunchResult = {
-  ok: true;
-  run: CodingFactoryRunState;
-  supervisor: CodingFactorySupervisorState;
-} | {
-  ok: false;
-  error: string;
-  code: LaunchErrorCode;
-};
-
-export type ResumeResult = LaunchResult;
-
-export type LaunchErrorCode =
-  | "MISSING_ISSUES"
-  | "INVALID_REPO"
-  | "INVALID_BRANCH"
-  | "CONFLICTING_RUN"
-  | "ALREADY_RUNNING"
-  | "RUN_NOT_FOUND"
-  | "IDENTITY_MISMATCH"
-  | "AMBIGUOUS_RESUME"
-  | "RUN_TERMINAL"
-  | "VALIDATION_FAILED";
+import { applyRunTransition, isTerminalIssueState } from "@/lib/coding-factory-state-machine";
 
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const BRANCH_PATTERN = /^[A-Za-z0-9._\/-]+$/;
-const SUPERVISOR_STALE_MS = 5 * 60 * 1000;
+const LEGACY_NIGHT_MODE_SCRIPT = process.env.CODING_FACTORY_NIGHT_MODE_SCRIPT || "/home/ubuntu/dev-handbook/automation/old_night-mode.sh";
+const DEFAULT_LOG_DIR = process.env.CODING_FACTORY_LOG_DIR || "/tmp";
+const ALLOWED_TARGET_REPO = process.env.CODING_FACTORY_ALLOWED_REPO || DEFAULT_TARGET_REPO;
 
-/* ── Supervisor persistence ── */
+export type LaunchSource = "start" | "resume";
 
-export async function readSupervisorState(): Promise<CodingFactorySupervisorState | null> {
-  return readJson<CodingFactorySupervisorState>(CODING_FACTORY_SUPERVISOR_PATH);
+export type CodingFactoryLaunchInput = {
+  mode: CodingFactoryMode;
+  targetRepo: string;
+  baseBranch: string;
+  selectedIssues: IssueRef[];
+  runId?: string;
+  source: LaunchSource;
+};
+
+export type CodingFactoryLaunchResult = {
+  run: CodingFactoryRunState;
+  supervisor: CodingFactorySupervisorState;
+};
+
+function validateLaunchInput(input: CodingFactoryLaunchInput): string | null {
+  if (!REPO_PATTERN.test(input.targetRepo)) return "Invalid targetRepo (expected owner/repo).";
+  if (!BRANCH_PATTERN.test(input.baseBranch)) return "Invalid baseBranch.";
+  if (input.targetRepo !== ALLOWED_TARGET_REPO) {
+    return `Unsupported targetRepo for v1 launcher: ${input.targetRepo}. Expected ${ALLOWED_TARGET_REPO}.`;
+  }
+  if (!Array.isArray(input.selectedIssues) || input.selectedIssues.length === 0) {
+    return "At least one selected issue is required.";
+  }
+  if (input.selectedIssues.some((issue) => issue.repo !== input.targetRepo)) {
+    return "Selected issues must all belong to the exact targetRepo.";
+  }
+  return null;
 }
 
-export async function writeSupervisorState(state: CodingFactorySupervisorState): Promise<void> {
+async function ensureScriptExists(): Promise<void> {
+  await access(LEGACY_NIGHT_MODE_SCRIPT);
+}
+
+function buildRunId(): string {
+  return `cf-${new Date().toISOString()}`;
+}
+
+function buildCommand(input: CodingFactoryLaunchInput): string[] {
+  return [
+    "bash",
+    LEGACY_NIGHT_MODE_SCRIPT,
+    ...input.selectedIssues.map((issue) => String(issue.issue)),
+    "--base",
+    input.baseBranch,
+    "--repo",
+    input.targetRepo,
+  ];
+}
+
+function queueAndStartRunState(
+  draft: CodingFactoryRunState,
+  at: string,
+  reason: string,
+): CodingFactoryRunState {
+  let current = {
+    state: draft.state,
+    stateHistory: [...draft.stateHistory],
+    stateUpdatedAt: draft.stateUpdatedAt,
+  };
+
+  if (current.state === "running") {
+    try {
+      current = applyRunTransition(current, {
+        to: "stuck",
+        at,
+        source: "api",
+        reason: `${reason}-stale-running`,
+      });
+    } catch {
+      // keep state history as-is and continue with hard reset below
+    }
+  }
+
+  if (current.state !== "queued") {
+    current = applyRunTransition(current, {
+      to: "queued",
+      at,
+      source: "api",
+      reason: `${reason}-queued`,
+    });
+  }
+
+  current = applyRunTransition(current, {
+    to: "running",
+    at,
+    source: "api",
+    reason: `${reason}-running`,
+  });
+
+  return {
+    ...draft,
+    updatedAt: at,
+    status: "running",
+    state: current.state,
+    stateUpdatedAt: current.stateUpdatedAt,
+    stateHistory: current.stateHistory,
+  };
+}
+
+async function spawnDetached(command: string[], logPath: string): Promise<number> {
+  await mkdir(DEFAULT_LOG_DIR, { recursive: true });
+  const fd = openSync(logPath, "a");
+  const child = spawn(command[0], command.slice(1), {
+    detached: true,
+    stdio: ["ignore", fd, fd],
+    env: {
+      ...process.env,
+      NO_COLOR: "1",
+    },
+  });
+
+  child.unref();
+  return child.pid ?? 0;
+}
+
+async function saveSupervisorState(state: CodingFactorySupervisorState): Promise<CodingFactorySupervisorState> {
   await writeJson(CODING_FACTORY_SUPERVISOR_PATH, state);
+  return state;
 }
 
 function createSupervisorState(
-  runId: string,
-  source: "start" | "resume",
-  request: { targetRepo: string; baseBranch: string; selectedIssues: IssueRef[] },
+  input: CodingFactoryLaunchInput,
+  run: CodingFactoryRunState,
+  pid: number,
+  logPath: string,
+  command: string[],
 ): CodingFactorySupervisorState {
   const now = new Date().toISOString();
   return {
     version: 1,
-    runId,
+    runId: run.runId,
     status: "running",
-    source,
-    pid: null,
-    targetRepo: request.targetRepo,
-    baseBranch: request.baseBranch,
-    issueKeys: request.selectedIssues.map((i) => i.issueKey),
-    issueNumbers: request.selectedIssues.map((i) => i.issue),
-    command: [],
-    logPath: "",
+    source: input.source,
+    pid,
+    targetRepo: input.targetRepo,
+    baseBranch: input.baseBranch,
+    issueKeys: input.selectedIssues.map((issue) => issue.issueKey),
+    issueNumbers: input.selectedIssues.map((issue) => issue.issue),
+    command,
+    logPath,
     startedAt: now,
     updatedAt: now,
   };
 }
 
-/* ── Shared validation helpers ── */
+export async function launchCodingFactoryRun(input: CodingFactoryLaunchInput): Promise<CodingFactoryLaunchResult> {
+  const validationError = validateLaunchInput(input);
+  if (validationError) throw new Error(validationError);
 
-function validateRepo(repo: string): string | null {
-  if (!repo || !REPO_PATTERN.test(repo)) return "Invalid target repo format";
-  return null;
-}
+  await ensureScriptExists();
 
-function validateBranch(branch: string): string | null {
-  if (!branch || !BRANCH_PATTERN.test(branch)) return "Invalid base branch format";
-  return null;
-}
-
-function validateIssues(issues: IssueRef[], targetRepo: string): string | null {
-  if (!issues || issues.length === 0) return "No issues selected";
-  for (const issue of issues) {
-    if (!Number.isInteger(issue.issue) || issue.issue <= 0) {
-      return `Invalid issue number: ${issue.issue}`;
-    }
-    if (issue.repo !== targetRepo) {
-      return `Issue ${issue.issueKey} does not belong to target repo ${targetRepo}`;
-    }
-  }
-  return null;
-}
-
-function isSupervisorActive(state: CodingFactorySupervisorState): boolean {
-  if (state.status !== "running") return false;
-  const age = Date.now() - new Date(state.updatedAt).getTime();
-  if (age > SUPERVISOR_STALE_MS) return false;
-  if (state.pid !== null && state.pid > 0) {
-    try {
-      process.kill(state.pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  return age < SUPERVISOR_STALE_MS;
-}
-
-async function checkNoConflictingRun(): Promise<{ conflict: boolean; reason?: string }> {
-  const isRunning = await checkNightModeProcessRunning();
-  if (isRunning) {
-    return { conflict: true, reason: "Night-mode process is currently running" };
+  const supervisorHealth = await readSupervisorHealth();
+  if (supervisorHealth.isHealthy || supervisorHealth.fallbackNightModeProcess) {
+    throw new Error("A Coding Factory / Night Mode run is already active. Refusing to launch another run.");
   }
 
-  const supervisor = await readSupervisorState();
-  if (supervisor && isSupervisorActive(supervisor)) {
-    return { conflict: true, reason: `Active supervisor attached to run ${supervisor.runId}` };
-  }
-
-  return { conflict: false };
-}
-
-/* ── Launch (start) ── */
-
-export async function validateAndStart(request: LaunchRequest): Promise<LaunchResult> {
-  // 1. Validate inputs
-  const repoErr = validateRepo(request.targetRepo);
-  if (repoErr) return { ok: false, error: repoErr, code: "INVALID_REPO" };
-
-  const branchErr = validateBranch(request.baseBranch);
-  if (branchErr) return { ok: false, error: branchErr, code: "INVALID_BRANCH" };
-
-  const issueErr = validateIssues(request.selectedIssues, request.targetRepo);
-  if (issueErr) return { ok: false, error: issueErr, code: "MISSING_ISSUES" };
-
-  // 2. Check no conflicting active run
-  const conflict = await checkNoConflictingRun();
-  if (conflict.conflict) {
-    return { ok: false, error: conflict.reason!, code: "CONFLICTING_RUN" };
-  }
-
-  // 3. Check persisted run is not already active (non-terminal)
-  const existingRun = await readRunState();
-  if (
-    existingRun.runId &&
-    !existingRun.runId.startsWith("draft-") &&
-    !isTerminalRunState(existingRun.state)
-  ) {
-    return {
-      ok: false,
-      error: `Non-terminal run ${existingRun.runId} already exists in state "${existingRun.state}". Complete or cancel it first.`,
-      code: "CONFLICTING_RUN",
-    };
-  }
-
-  // 4. Build validated run state
   const now = new Date().toISOString();
-  const runId = `cf-${now}`;
-  const intake: CodingFactoryIntakeState = {
+  const draftInput: CodingFactoryIntakeState = {
     version: 1,
     updatedAt: now,
-    mode: request.mode,
-    targetRepo: request.targetRepo,
-    baseBranch: request.baseBranch,
-    selectedIssues: request.selectedIssues,
+    mode: input.mode,
+    targetRepo: input.targetRepo,
+    baseBranch: input.baseBranch,
+    selectedIssues: input.selectedIssues,
   };
 
-  let runBase = createDraftRunState(intake, "draft");
-  runBase = { ...runBase, runId };
+  const currentRun = await readRunState(draftInput);
+  const runBase = input.source === "resume"
+    ? {
+        ...currentRun,
+        mode: input.mode,
+        targetRepo: input.targetRepo,
+        baseBranch: input.baseBranch,
+        selectedIssues: input.selectedIssues,
+        runId: input.runId || currentRun.runId,
+      }
+    : {
+        ...createDraftRunState(draftInput, "draft"),
+        runId: input.runId || buildRunId(),
+      };
 
-  // Transition: created → intake_validated → queued
-  let current = {
-    state: runBase.state,
-    stateHistory: runBase.stateHistory,
-    stateUpdatedAt: runBase.stateUpdatedAt,
+  const preparedRun = queueAndStartRunState(runBase, now, input.source);
+  const command = buildCommand(input);
+  const logPath = join(DEFAULT_LOG_DIR, `coding-factory-${preparedRun.runId}.log`);
+  const pid = await spawnDetached(command, logPath);
+
+  if (!pid) {
+    throw new Error("Failed to start Coding Factory launcher process.");
+  }
+
+  const run = await saveRunState(preparedRun, draftInput);
+  const supervisor = await saveSupervisorState(createSupervisorState(input, run, pid, logPath, command));
+  return { run, supervisor };
+}
+
+export async function buildResumeLaunchInput(runId: string): Promise<CodingFactoryLaunchInput> {
+  const trimmedRunId = runId.trim();
+  if (!trimmedRunId) throw new Error("runId is required for resume.");
+
+  const [run, supervisor, allIssues] = await Promise.all([
+    readRunState(),
+    readSupervisorState(),
+    readIssueStates(),
+  ]);
+
+  if (!run.runId || run.runId !== trimmedRunId) {
+    throw new Error(`Resume rejected: runId ${trimmedRunId} does not match the persisted run identity.`);
+  }
+
+  if (run.selectedIssues.length === 0) {
+    throw new Error("Resume rejected: persisted run has no selected issues.");
+  }
+
+  if (supervisor && supervisor.status === "running" && supervisor.runId !== trimmedRunId) {
+    throw new Error(`Resume rejected: supervisor file belongs to a different run (${supervisor.runId}).`);
+  }
+
+  const selectedIssueStates = selectIssuesByKey(allIssues, run.selectedIssues);
+  const selectedIssueStateKeys = new Set(selectedIssueStates.map((issue) => issue.issueKey));
+  const missingIssueKeys = run.selectedIssues
+    .map((issue) => issue.issueKey)
+    .filter((issueKey) => !selectedIssueStateKeys.has(issueKey));
+
+  if (missingIssueKeys.length > 0) {
+    throw new Error(`Resume rejected: missing exact issue state for ${missingIssueKeys.join(", ")}.`);
+  }
+
+  const resumableIssues = selectedIssueStates
+    .filter((issue) => !isTerminalIssueState(issue.state) && issue.state !== "pr_created")
+    .map((issue) => run.selectedIssues.find((selected) => selected.issueKey === issue.issueKey)!)
+    .filter(Boolean);
+
+  if (resumableIssues.length === 0) {
+    throw new Error("Resume rejected: no resumable issues remain for this run.");
+  }
+
+  return {
+    mode: run.mode,
+    targetRepo: run.targetRepo,
+    baseBranch: run.baseBranch,
+    selectedIssues: resumableIssues,
+    runId: run.runId,
+    source: "resume",
   };
-
-  if (current.state === "created") {
-    current = applyRunTransition(current, {
-      to: "intake_validated",
-      source: "api",
-      reason: "launcher-validated",
-    });
-  }
-
-  current = applyRunTransition(current, {
-    to: "queued",
-    source: "api",
-    reason: "launcher-start",
-  });
-
-  const run = await saveRunState({
-    ...runBase,
-    state: current.state,
-    stateHistory: current.stateHistory,
-    stateUpdatedAt: current.stateUpdatedAt,
-    status: "running",
-  });
-
-  // 5. Attach supervisor
-  const supervisor = createSupervisorState(run.runId, "start", request);
-  await writeSupervisorState(supervisor);
-
-  return { ok: true, run, supervisor };
-}
-
-/* ── Resume ── */
-
-export async function validateAndResume(request: ResumeRequest): Promise<ResumeResult> {
-  // 1. Validate inputs
-  const repoErr = validateRepo(request.targetRepo);
-  if (repoErr) return { ok: false, error: repoErr, code: "INVALID_REPO" };
-
-  const branchErr = validateBranch(request.baseBranch);
-  if (branchErr) return { ok: false, error: branchErr, code: "INVALID_BRANCH" };
-
-  const issueErr = validateIssues(request.selectedIssues, request.targetRepo);
-  if (issueErr) return { ok: false, error: issueErr, code: "MISSING_ISSUES" };
-
-  // 2. Check no conflicting process
-  const conflict = await checkNoConflictingRun();
-  if (conflict.conflict) {
-    return { ok: false, error: conflict.reason!, code: "ALREADY_RUNNING" };
-  }
-
-  // 3. Load persisted run
-  const existingRun = await readRunState();
-  if (!existingRun.runId || existingRun.runId.startsWith("draft-")) {
-    return { ok: false, error: "No persisted run found to resume", code: "RUN_NOT_FOUND" };
-  }
-
-  // 4. Exact identity match — Mission Control validates, no guessing
-  if (existingRun.runId !== request.runId) {
-    return {
-      ok: false,
-      error: `Run ID mismatch: requested "${request.runId}" but persisted run is "${existingRun.runId}"`,
-      code: "IDENTITY_MISMATCH",
-    };
-  }
-
-  if (existingRun.targetRepo !== request.targetRepo) {
-    return {
-      ok: false,
-      error: `Repo mismatch: requested "${request.targetRepo}" but run targets "${existingRun.targetRepo}"`,
-      code: "IDENTITY_MISMATCH",
-    };
-  }
-
-  if (existingRun.baseBranch !== request.baseBranch) {
-    return {
-      ok: false,
-      error: `Branch mismatch: requested "${request.baseBranch}" but run uses "${existingRun.baseBranch}"`,
-      code: "IDENTITY_MISMATCH",
-    };
-  }
-
-  // 5. Validate issue set matches exactly
-  const existingKeys = new Set(existingRun.selectedIssues.map((i) => i.issueKey));
-  const requestKeys = new Set(request.selectedIssues.map((i) => i.issueKey));
-  if (existingKeys.size !== requestKeys.size || [...existingKeys].some((k) => !requestKeys.has(k))) {
-    return {
-      ok: false,
-      error: "Issue set mismatch between resume request and persisted run. Reject ambiguous resume.",
-      code: "AMBIGUOUS_RESUME",
-    };
-  }
-
-  // 6. Check run is not already terminal
-  if (isTerminalRunState(existingRun.state)) {
-    return {
-      ok: false,
-      error: `Run ${existingRun.runId} is in terminal state "${existingRun.state}" and cannot be resumed`,
-      code: "RUN_TERMINAL",
-    };
-  }
-
-  // 7. Validate issue states are consistent — no fully-terminal issue set
-  const allIssues = await readIssueStates();
-  const selectedIssueStates = selectIssuesByKey(allIssues, existingRun.selectedIssues);
-  const allTerminal = selectedIssueStates.length > 0 &&
-    selectedIssueStates.every((i) => isTerminalIssueState(i.state));
-  if (allTerminal) {
-    return {
-      ok: false,
-      error: "All selected issues are in terminal states — nothing to resume",
-      code: "RUN_TERMINAL",
-    };
-  }
-
-  // 8. Transition run to queued via normal start path
-  let current = {
-    state: existingRun.state,
-    stateHistory: [...existingRun.stateHistory],
-    stateUpdatedAt: existingRun.stateUpdatedAt,
-  };
-
-  try {
-    if (current.state !== "queued" && current.state !== "running") {
-      current = applyRunTransition(current, {
-        to: "queued",
-        source: "api",
-        reason: "launcher-resume",
-      });
-    }
-  } catch {
-    // State machine may reject transition from certain states; that's ok,
-    // we still proceed if we can get to running
-  }
-
-  const run = await saveRunState({
-    ...existingRun,
-    state: current.state,
-    stateHistory: current.stateHistory,
-    stateUpdatedAt: current.stateUpdatedAt,
-    status: "running",
-  });
-
-  // 9. Attach supervisor
-  const supervisor = createSupervisorState(run.runId, "resume", request);
-  await writeSupervisorState(supervisor);
-
-  return { ok: true, run, supervisor };
-}
-
-/* ── Supervisor heartbeat (for external callers) ── */
-
-export async function supervisorHeartbeat(runId: string): Promise<{ ok: boolean; runId: string | null }> {
-  const state = await readSupervisorState();
-  if (!state || state.runId !== runId) {
-    return { ok: false, runId: state?.runId ?? null };
-  }
-
-  await writeSupervisorState({
-    ...state,
-    updatedAt: new Date().toISOString(),
-    status: "running",
-  });
-
-  return { ok: true, runId };
-}
-
-/* ── Supervisor detach (for external callers) ── */
-
-export async function supervisorDetach(runId: string): Promise<void> {
-  const state = await readSupervisorState();
-  if (!state || state.runId !== runId) return;
-
-  await writeSupervisorState({
-    ...state,
-    status: "finished",
-    finishedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  });
 }

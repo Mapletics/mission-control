@@ -775,6 +775,7 @@ function finalizeRunState(
 async function resolveRunState(
   intake: CodingFactoryIntakeState,
   nightMode: NightModeState | null,
+  supervisor: CodingFactorySupervisorHealth,
   isNightModeRunning: boolean,
   allIssues: IssueState[],
 ): Promise<{
@@ -784,6 +785,49 @@ async function resolveRunState(
 }> {
   const existingRun = await readPersistedRunState(intake);
   const persistedOrDraft = existingRun ?? createDraftRunState(intake, intake.selectedIssues.length > 0 ? "draft" : "idle");
+
+  const hasAttachedSupervisorRun = Boolean(
+    existingRun
+      && supervisor.isHealthy
+      && supervisor.runId
+      && supervisor.runId === existingRun.runId,
+  );
+
+  if (existingRun && hasAttachedSupervisorRun) {
+    let activeRun = finalizeRunState(existingRun, allIssues, nightMode);
+
+    if (activeRun.state !== "running") {
+      try {
+        const next = applyRunTransition(activeRun, {
+          to: "running",
+          at: nightMode?.startedAt ?? supervisor.startedAt ?? new Date().toISOString(),
+          source: "derived",
+          reason: "supervisor-attached",
+        });
+
+        activeRun = {
+          ...activeRun,
+          status: "running",
+          state: next.state,
+          stateUpdatedAt: next.stateUpdatedAt,
+          stateHistory: next.stateHistory,
+        };
+      } catch {
+        activeRun = {
+          ...activeRun,
+          status: "running",
+          state: "running",
+          stateUpdatedAt: supervisor.startedAt ?? new Date().toISOString(),
+        };
+      }
+    }
+
+    return {
+      run: existingRun,
+      activeRun,
+      runSource: "persisted",
+    };
+  }
 
   if (isNightModeRunning || nightMode?.status === "running") {
     return {
@@ -836,10 +880,38 @@ export async function listAvailableIssues(options: ListAvailableIssuesOptions = 
     }));
 }
 
-const SUPERVISOR_STALE_MS = 5 * 60 * 1000;
+function isValidSupervisorState(input: unknown): input is CodingFactorySupervisorState {
+  if (!input || typeof input !== "object") return false;
 
-function isPidAlive(pid: number | null): boolean {
-  if (pid === null || pid <= 0) return false;
+  const payload = input as Record<string, unknown>;
+  return typeof payload.runId === "string"
+    && typeof payload.status === "string"
+    && ["running", "finished", "failed"].includes(payload.status)
+    && typeof payload.targetRepo === "string"
+    && typeof payload.baseBranch === "string"
+    && Array.isArray(payload.issueKeys)
+    && Array.isArray(payload.issueNumbers)
+    && Array.isArray(payload.command)
+    && typeof payload.logPath === "string"
+    && typeof payload.updatedAt === "string";
+}
+
+export async function readSupervisorState(): Promise<CodingFactorySupervisorState | null> {
+  const state = await readJson<unknown>(CODING_FACTORY_SUPERVISOR_PATH);
+  if (!isValidSupervisorState(state)) {
+    return null;
+  }
+
+  return {
+    ...state,
+    version: 1,
+    startedAt: typeof state.startedAt === "string" ? state.startedAt : state.updatedAt,
+  };
+}
+
+function isProcessAlive(pid: number | null | undefined): boolean {
+  if (!Number.isInteger(pid) || !pid || pid <= 0) return false;
+
   try {
     process.kill(pid, 0);
     return true;
@@ -848,35 +920,15 @@ function isPidAlive(pid: number | null): boolean {
   }
 }
 
-function deriveSupervisorStatus(
-  state: CodingFactorySupervisorState | null,
-  pidAlive: boolean,
-  nightModeRunning: boolean,
-): CodingFactorySupervisorStatus {
-  if (!state) return nightModeRunning ? "running" : "absent";
-  if (state.status === "failed") return "failed";
-  if (state.status === "finished") return "finished";
-  // status === "running"
-  if (pidAlive) return "running";
-  const age = Date.now() - new Date(state.updatedAt).getTime();
-  if (age > SUPERVISOR_STALE_MS) return "stale";
-  return "running";
-}
-
-async function readSupervisorHealth(): Promise<CodingFactorySupervisorHealth> {
-  const [state, nightModeRunning] = await Promise.all([
-    readJson<CodingFactorySupervisorState>(CODING_FACTORY_SUPERVISOR_PATH),
-    checkNightModeProcessRunning(),
-  ]);
-
-  const pidAlive = isPidAlive(state?.pid ?? null);
-  const status = deriveSupervisorStatus(state, pidAlive, nightModeRunning);
-  const isHealthy = status === "running";
+export async function readSupervisorHealth(): Promise<CodingFactorySupervisorHealth> {
+  const state = await readSupervisorState();
+  const pidAlive = isProcessAlive(state?.pid ?? null);
+  const fallbackNightModeProcess = !pidAlive && await checkNightModeProcessRunning();
 
   if (!state) {
     return {
-      status,
-      isHealthy,
+      status: fallbackNightModeProcess ? "running" : "absent",
+      isHealthy: false,
       pid: null,
       pidAlive: false,
       runId: null,
@@ -889,50 +941,64 @@ async function readSupervisorHealth(): Promise<CodingFactorySupervisorHealth> {
       startedAt: null,
       finishedAt: null,
       updatedAt: null,
-      fallbackNightModeProcess: nightModeRunning,
-      fallbackUsed: nightModeRunning,
+      fallbackNightModeProcess,
+      fallbackUsed: fallbackNightModeProcess,
     };
   }
 
+  const status: CodingFactorySupervisorStatus = state.status === "running"
+    ? (pidAlive ? "running" : "stale")
+    : state.status;
+
   return {
     status,
-    isHealthy,
+    isHealthy: status === "running" && pidAlive,
     pid: state.pid,
     pidAlive,
     runId: state.runId,
     source: state.source,
     targetRepo: state.targetRepo,
     baseBranch: state.baseBranch,
-    issueKeys: state.issueKeys,
-    issueNumbers: state.issueNumbers,
+    issueKeys: [...state.issueKeys],
+    issueNumbers: [...state.issueNumbers],
     logPath: state.logPath,
     startedAt: state.startedAt,
     finishedAt: state.finishedAt ?? null,
     updatedAt: state.updatedAt,
-    fallbackNightModeProcess: nightModeRunning,
-    fallbackUsed: false,
+    fallbackNightModeProcess,
+    fallbackUsed: !pidAlive && fallbackNightModeProcess,
   };
 }
 
 export async function getCodingFactoryStatus(): Promise<CodingFactoryStatus> {
-  const [nightMode, isRunning, allIssues, intake, supervisor] = await Promise.all([
+  const [nightMode, allIssues, intake, supervisor] = await Promise.all([
     readJson<NightModeState>(NIGHT_MODE_STATE_PATH),
-    checkNightModeProcessRunning(),
     readIssueStates(),
     readIntakeState(),
     readSupervisorHealth(),
   ]);
 
-  const { run, activeRun, runSource } = await resolveRunState(intake, nightMode, isRunning, allIssues);
+  const isNightModeRunning = supervisor.isHealthy
+    ? false
+    : Boolean(supervisor.fallbackNightModeProcess || nightMode?.status === "running");
+
+  const { run, activeRun, runSource } = await resolveRunState(
+    intake,
+    nightMode,
+    supervisor,
+    isNightModeRunning,
+    allIssues,
+  );
   const issues = sortIssues(selectIssuesByKey(allIssues, activeRun.selectedIssues));
+  const isRunning = supervisor.isHealthy || isNightModeRunning;
 
   return {
     isRunning,
-    status: nightMode?.status ?? activeRun.status ?? "unknown",
+    status: isRunning ? (nightMode?.status ?? activeRun.status ?? "running") : (nightMode?.status ?? activeRun.status ?? "unknown"),
     state: activeRun.state,
     integrationBranch: nightMode?.integrationBranch ?? null,
-    startedAt: nightMode?.startedAt ?? null,
-    finishedAt: nightMode?.finishedAt ?? null,
+    startedAt: nightMode?.startedAt ?? supervisor.startedAt ?? null,
+    finishedAt: nightMode?.finishedAt ?? supervisor.finishedAt ?? null,
     issues,
     stats: computeStats(issues),
     run,
