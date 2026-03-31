@@ -1,10 +1,30 @@
 import { readFile, readdir, writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 import { exec } from "child_process";
+import {
+  ISSUE_STATES,
+  RUN_STATES,
+  applyIssueTransition,
+  applyRunTransition,
+  deriveIssueStateHistory,
+  deriveRunStateHistory,
+  inferIssueStateFromLegacyTopLevel,
+  isIssueState,
+  isRunState,
+  isTerminalIssueState,
+  issuePhaseFromState,
+  legacyRunStatusFromState,
+  normalizePersistedTransitions,
+  resolveRunStateFromIssues,
+  type CodingFactoryIssueStateName,
+  type CodingFactoryRunStateName,
+  type StateTransition,
+} from "@/lib/coding-factory-state-machine";
 
 export const WORK_STATE_DIR = process.env.WORK_STATE_DIR || "/home/ubuntu/repos/.work-state";
 export const CODING_FACTORY_INTAKE_PATH = join(WORK_STATE_DIR, "coding-factory-intake.json");
 export const CODING_FACTORY_RUN_PATH = join(WORK_STATE_DIR, "coding-factory-run.json");
+export const CODING_FACTORY_SUPERVISOR_PATH = join(WORK_STATE_DIR, "coding-factory-supervisor.json");
 export const NIGHT_MODE_STATE_PATH = join(WORK_STATE_DIR, "night-mode.json");
 export const TERMINAL_PHASES = new Set(["done", "pr-created", "blocked", "aborted", "failed"]);
 
@@ -32,6 +52,9 @@ export type IssueState = IssueRef & {
   baseBranch: string;
   size: string;
   phase: string;
+  state: CodingFactoryIssueStateName;
+  stateUpdatedAt: string;
+  stateHistory: StateTransition<CodingFactoryIssueStateName>[];
   prUrl?: string;
   merged: boolean;
   startedAt: string;
@@ -42,6 +65,9 @@ export type IssueState = IssueRef & {
 
 export type NightModeState = {
   status: string;
+  state?: CodingFactoryRunStateName;
+  stateUpdatedAt?: string;
+  stateHistory?: StateTransition<CodingFactoryRunStateName>[];
   integrationBranch: string;
   startedAt: string;
   finishedAt?: string;
@@ -67,7 +93,7 @@ export type CodingFactoryIntakeState = {
 };
 
 export type CodingFactoryRunState = {
-  version: 1;
+  version: number;
   updatedAt: string;
   runId: string;
   mode: CodingFactoryMode;
@@ -75,6 +101,9 @@ export type CodingFactoryRunState = {
   baseBranch: string;
   selectedIssues: IssueRef[];
   status: CodingFactoryRunStatus;
+  state: CodingFactoryRunStateName;
+  stateUpdatedAt: string;
+  stateHistory: StateTransition<CodingFactoryRunStateName>[];
 };
 
 export type CodingFactoryStats = {
@@ -86,9 +115,49 @@ export type CodingFactoryStats = {
   prsCreated: number;
 };
 
+export type CodingFactorySupervisorStatus = "absent" | "running" | "stale" | "finished" | "failed";
+
+export type CodingFactorySupervisorState = {
+  version: 1;
+  runId: string;
+  status: "running" | "finished" | "failed";
+  source: "start" | "resume";
+  pid: number | null;
+  targetRepo: string;
+  baseBranch: string;
+  issueKeys: string[];
+  issueNumbers: number[];
+  command: string[];
+  logPath: string;
+  startedAt: string;
+  finishedAt?: string;
+  exitCode?: number | null;
+  updatedAt: string;
+};
+
+export type CodingFactorySupervisorHealth = {
+  status: CodingFactorySupervisorStatus;
+  isHealthy: boolean;
+  pid: number | null;
+  pidAlive: boolean;
+  runId: string | null;
+  source: CodingFactorySupervisorState["source"] | null;
+  targetRepo: string | null;
+  baseBranch: string | null;
+  issueKeys: string[];
+  issueNumbers: number[];
+  logPath: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string | null;
+  fallbackNightModeProcess: boolean;
+  fallbackUsed: boolean;
+};
+
 export type CodingFactoryStatus = {
   isRunning: boolean;
   status: string;
+  state: CodingFactoryRunStateName;
   integrationBranch: string | null;
   startedAt: string | null;
   finishedAt: string | null;
@@ -97,11 +166,17 @@ export type CodingFactoryStatus = {
   run: CodingFactoryRunState;
   activeRun: CodingFactoryRunState;
   runSource: CodingFactoryRunSource;
+  supervisor: CodingFactorySupervisorHealth;
+  stateMachine: {
+    runStates: readonly CodingFactoryRunStateName[];
+    issueStates: readonly CodingFactoryIssueStateName[];
+  };
 };
 
 export type AvailableIssue = IssueRef & {
   baseBranch: string;
   phase: string;
+  state: CodingFactoryIssueStateName;
   updatedAt: string;
 };
 
@@ -144,6 +219,17 @@ export async function writeJson(path: string, data: unknown): Promise<void> {
 
 export const DEFAULT_TARGET_REPO = "Mapletics/App_frontend";
 
+function isIsoDate(value: unknown): value is string {
+  return typeof value === "string" && !Number.isNaN(new Date(value).getTime());
+}
+
+function coerceTimestamp(...values: Array<unknown>): string {
+  for (const value of values) {
+    if (isIsoDate(value)) return value;
+  }
+  return new Date().toISOString();
+}
+
 export function buildIssueKey(repo: string, issue: number): string {
   return `${repo}#${issue}`;
 }
@@ -183,9 +269,26 @@ export function defaultIntakeState(): CodingFactoryIntakeState {
   };
 }
 
-export function createDraftRunState(intake: CodingFactoryIntakeState, status: CodingFactoryRunStatus = "draft"): CodingFactoryRunState {
+export function createDraftRunState(
+  intake: CodingFactoryIntakeState,
+  status: CodingFactoryRunStatus = "draft",
+): CodingFactoryRunState {
+  let current = {
+    state: "created" as CodingFactoryRunStateName,
+    stateHistory: [] as StateTransition<CodingFactoryRunStateName>[],
+    stateUpdatedAt: new Date().toISOString(),
+  };
+
+  if (intake.selectedIssues.length > 0) {
+    current = applyRunTransition(current, {
+      to: "intake_validated",
+      source: "derived",
+      reason: "draft-intake-selected",
+    });
+  }
+
   return {
-    version: 1,
+    version: 2,
     updatedAt: new Date().toISOString(),
     runId: `draft-${intake.targetRepo.replace(/\//g, "-")}`,
     mode: intake.mode,
@@ -193,6 +296,9 @@ export function createDraftRunState(intake: CodingFactoryIntakeState, status: Co
     baseBranch: intake.baseBranch,
     selectedIssues: intake.selectedIssues,
     status,
+    state: current.state,
+    stateUpdatedAt: current.stateUpdatedAt,
+    stateHistory: current.stateHistory,
   };
 }
 
@@ -234,16 +340,98 @@ function uniqueIssues(issues: CodingFactoryIntakeIssue[]): CodingFactoryIntakeIs
   });
 }
 
+function issueSortWeight(issue: IssueState): number {
+  if (isTerminalIssueState(issue.state)) return 1;
+  return 0;
+}
+
 export function sortIssues(issues: IssueState[]): IssueState[] {
   return [...issues].sort((a, b) => {
-    const aTerminal = TERMINAL_PHASES.has(a.phase) ? 1 : 0;
-    const bTerminal = TERMINAL_PHASES.has(b.phase) ? 1 : 0;
-    if (aTerminal !== bTerminal) return aTerminal - bTerminal;
+    const terminalDelta = issueSortWeight(a) - issueSortWeight(b);
+    if (terminalDelta !== 0) return terminalDelta;
+
+    const updatedDelta = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    if (updatedDelta !== 0) return updatedDelta;
 
     const repoDelta = a.repo.localeCompare(b.repo);
     if (repoDelta !== 0) return repoDelta;
     return a.issue - b.issue;
   });
+}
+
+function normalizeIssueHistory(input: unknown): IssueHistory[] {
+  if (!Array.isArray(input)) return [];
+
+  const history: IssueHistory[] = [];
+  for (const entry of input) {
+    if (!entry || typeof entry !== "object") continue;
+    const item = entry as Record<string, unknown>;
+    history.push({
+      phase: typeof item.phase === "string" ? item.phase : "started",
+      status: typeof item.status === "string" ? item.status : "unknown",
+      at: coerceTimestamp(item.at),
+      round: typeof item.round === "number" ? item.round : undefined,
+      extra: typeof item.extra === "string" ? item.extra : undefined,
+    });
+  }
+
+  return history.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+}
+
+function normalizeIssueStateRecord(input: unknown): IssueState | null {
+  if (!input || typeof input !== "object") return null;
+
+  const payload = input as Record<string, unknown>;
+  const repo = typeof payload.repo === "string" ? payload.repo.trim() : "";
+  const issue = typeof payload.issue === "number" ? payload.issue : Number(payload.issue);
+  if (!REPO_PATTERN.test(repo) || !Number.isInteger(issue) || issue <= 0) return null;
+
+  const issueKey = buildIssueKey(repo, issue);
+  const title = typeof payload.title === "string" && payload.title.trim() ? payload.title.trim() : `Issue #${issue}`;
+  const history = normalizeIssueHistory(payload.history);
+
+  const persistedStateHistory = normalizePersistedTransitions<CodingFactoryIssueStateName>(payload.stateHistory, isIssueState);
+  const derivedState = deriveIssueStateHistory({
+    history,
+    phase: typeof payload.phase === "string" ? payload.phase : undefined,
+    status: typeof payload.status === "string" ? payload.status : undefined,
+    prUrl: typeof payload.prUrl === "string" ? payload.prUrl : undefined,
+    merged: payload.merged === true,
+    updatedAt: isIsoDate(payload.updatedAt) ? payload.updatedAt : undefined,
+    startedAt: isIsoDate(payload.startedAt) ? payload.startedAt : undefined,
+  });
+
+  const issueState = isIssueState(payload.state) ? payload.state : derivedState.state;
+  const stateHistory = persistedStateHistory.length > 0 ? persistedStateHistory : derivedState.stateHistory;
+  const stateUpdatedAt = coerceTimestamp(
+    payload.stateUpdatedAt,
+    stateHistory[stateHistory.length - 1]?.at,
+    payload.updatedAt,
+    payload.startedAt,
+  );
+
+  return {
+    version: typeof payload.version === "number" ? Math.max(payload.version, 2) : 2,
+    issue,
+    repo,
+    issueKey,
+    title,
+    branch: typeof payload.branch === "string" ? payload.branch : "",
+    baseBranch: typeof payload.baseBranch === "string" ? payload.baseBranch : "dev",
+    size: typeof payload.size === "string" ? payload.size : "",
+    phase: typeof payload.phase === "string"
+      ? payload.phase
+      : issuePhaseFromState(issueState),
+    state: issueState,
+    stateUpdatedAt,
+    stateHistory,
+    prUrl: typeof payload.prUrl === "string" ? payload.prUrl : undefined,
+    merged: payload.merged === true,
+    startedAt: coerceTimestamp(payload.startedAt, history[0]?.at, payload.updatedAt),
+    updatedAt: coerceTimestamp(payload.updatedAt, stateUpdatedAt, payload.startedAt),
+    duration: typeof payload.duration === "number" || payload.duration === null ? payload.duration : null,
+    history,
+  };
 }
 
 export async function readIssueStates(): Promise<IssueState[]> {
@@ -258,7 +446,7 @@ export async function readIssueStates(): Promise<IssueState[]> {
   const issues = await Promise.all(
     issueFiles.map(async (fileName) => ({
       fileName,
-      issue: await readJson<IssueState>(join(WORK_STATE_DIR, fileName)),
+      issue: normalizeIssueStateRecord(await readJson<Record<string, unknown>>(join(WORK_STATE_DIR, fileName))),
     })),
   );
 
@@ -266,25 +454,16 @@ export async function readIssueStates(): Promise<IssueState[]> {
 
   for (const entry of issues) {
     const issue = entry.issue;
-    if (!issue || !REPO_PATTERN.test(issue.repo) || !Number.isInteger(issue.issue) || issue.issue <= 0) {
-      continue;
-    }
+    if (!issue) continue;
 
-    const normalizedIssue = {
-      ...issue,
-      version: 2,
-      issueKey: buildIssueKey(issue.repo, issue.issue),
-      title: issue.title?.trim() || `Issue #${issue.issue}`,
-    } satisfies IssueState;
-
-    const existing = byIssueKey.get(normalizedIssue.issueKey);
+    const existing = byIssueKey.get(issue.issueKey);
     const isRepoScopedFile = !/^issue-\d+\.json$/.test(entry.fileName);
     const existingIsRepoScopedFile = existing ? !/^issue-\d+\.json$/.test(existing.fileName) : false;
 
     if (!existing || (isRepoScopedFile && !existingIsRepoScopedFile)) {
-      byIssueKey.set(normalizedIssue.issueKey, {
+      byIssueKey.set(issue.issueKey, {
         fileName: entry.fileName,
-        issue: normalizedIssue,
+        issue,
       });
     }
   }
@@ -312,11 +491,11 @@ export async function checkNightModeProcessRunning(): Promise<boolean> {
 export function computeStats(issues: IssueState[]): CodingFactoryStats {
   return {
     total: issues.length,
-    completed: issues.filter((issue) => issue.phase === "done" || issue.phase === "pr-created").length,
-    failed: issues.filter((issue) => issue.phase === "failed" || issue.phase === "aborted").length,
-    blocked: issues.filter((issue) => issue.phase === "blocked").length,
-    inProgress: issues.filter((issue) => !TERMINAL_PHASES.has(issue.phase)).length,
-    prsCreated: issues.filter((issue) => !!issue.prUrl).length,
+    completed: issues.filter((issue) => issue.state === "completed" || issue.state === "pr_created").length,
+    failed: issues.filter((issue) => issue.state === "failed" || issue.state === "cancelled").length,
+    blocked: issues.filter((issue) => issue.state === "blocked" || issue.state === "stuck").length,
+    inProgress: issues.filter((issue) => !isTerminalIssueState(issue.state)).length,
+    prsCreated: issues.filter((issue) => issue.state === "pr_created" || !!issue.prUrl).length,
   };
 }
 
@@ -363,10 +542,6 @@ export function normalizeRunState(input: unknown, intakeFallback?: CodingFactory
 
   const mode = payload.mode === "batch" ? "batch" : "single";
   const runId = typeof payload.runId === "string" && payload.runId.trim() ? payload.runId.trim() : fallback.runId;
-  const rawStatus = typeof payload.status === "string" ? payload.status.trim() : fallback.status;
-  const status: CodingFactoryRunStatus = ["draft", "running", "completed", "idle", "unknown"].includes(rawStatus)
-    ? rawStatus as CodingFactoryRunStatus
-    : fallback.status;
 
   const selectedIssuesRaw = Array.isArray(payload.selectedIssues) ? payload.selectedIssues : [];
   const selectedIssues = uniqueIssues(
@@ -376,8 +551,26 @@ export function normalizeRunState(input: unknown, intakeFallback?: CodingFactory
       .filter((item) => item.repo === targetRepo),
   );
 
+  const persistedStateHistory = normalizePersistedTransitions<CodingFactoryRunStateName>(payload.stateHistory, isRunState);
+  const derivedRunState = deriveRunStateHistory({
+    status: typeof payload.status === "string" ? payload.status.trim() : undefined,
+    state: isRunState(payload.state) ? payload.state : undefined,
+    stateHistory: persistedStateHistory,
+    updatedAt: isIsoDate(payload.updatedAt) ? payload.updatedAt : undefined,
+    hasSelectedIssues: selectedIssues.length > 0,
+  });
+
+  const state = isRunState(payload.state) ? payload.state : derivedRunState.state;
+  const stateHistory = persistedStateHistory.length > 0 ? persistedStateHistory : derivedRunState.stateHistory;
+  const stateUpdatedAt = coerceTimestamp(payload.stateUpdatedAt, stateHistory[stateHistory.length - 1]?.at, payload.updatedAt);
+
+  const rawStatus = typeof payload.status === "string" ? payload.status.trim() : undefined;
+  const status: CodingFactoryRunStatus = ["draft", "running", "completed", "idle", "unknown"].includes(rawStatus || "")
+    ? rawStatus as CodingFactoryRunStatus
+    : legacyRunStatusFromState(state, { hasSelectedIssues: selectedIssues.length > 0 });
+
   return {
-    version: 1,
+    version: typeof payload.version === "number" ? Math.max(payload.version, 2) : 2,
     updatedAt: new Date().toISOString(),
     runId,
     mode,
@@ -385,6 +578,9 @@ export function normalizeRunState(input: unknown, intakeFallback?: CodingFactory
     baseBranch,
     selectedIssues: mode === "single" ? selectedIssues.slice(0, 1) : selectedIssues,
     status,
+    state,
+    stateUpdatedAt,
+    stateHistory,
   };
 }
 
@@ -414,7 +610,10 @@ export async function readRunState(intakeFallback?: CodingFactoryIntakeState): P
 export async function saveRunState(input: unknown, intakeFallback?: CodingFactoryIntakeState): Promise<CodingFactoryRunState> {
   const intake = intakeFallback ?? await readIntakeState();
   const nextState = normalizeRunState(input, intake);
-  await writeJson(CODING_FACTORY_RUN_PATH, nextState);
+  await writeJson(CODING_FACTORY_RUN_PATH, {
+    ...nextState,
+    status: legacyRunStatusFromState(nextState.state, { hasSelectedIssues: nextState.selectedIssues.length > 0 }),
+  });
   return nextState;
 }
 
@@ -473,27 +672,57 @@ function buildLegacyBridgeRunState(
   allIssues: IssueState[],
   existingRun: CodingFactoryRunState,
 ): CodingFactoryRunState {
-  const fallbackRepo = intake.targetRepo || existingRun.targetRepo || existingRun.selectedIssues[0]?.repo;
+  const fallbackRepo = intake.targetRepo || existingRun.targetRepo || existingRun.selectedIssues[0]?.repo || DEFAULT_TARGET_REPO;
   const selectedIssues = buildLegacyIssueRefs(nightMode, allIssues, existingRun, fallbackRepo);
   const selectedIssueStates = selectIssuesByKey(allIssues, selectedIssues);
   const targetRepo = selectedIssues[0]?.repo || fallbackRepo;
 
   const inferredMode: CodingFactoryMode = selectedIssues.length > 1 ? "batch" : "single";
-  const status: CodingFactoryRunStatus = nightMode?.status === "running"
-    ? "running"
-    : selectedIssues.length > 0
-      ? "unknown"
-      : "idle";
+  const canonicalState = resolveRunStateFromIssues({
+    currentState: nightMode?.state ?? existingRun.state,
+    selectedIssueStates: selectedIssueStates.map((issue) => issue.state),
+    isNightModeRunning: nightMode?.status === "running",
+    finishedAt: nightMode?.finishedAt ?? null,
+  });
+
+  const transitionBase = normalizePersistedTransitions<CodingFactoryRunStateName>(nightMode?.stateHistory, isRunState);
+  let current = deriveRunStateHistory({
+    status: nightMode?.status,
+    state: nightMode?.state,
+    stateHistory: transitionBase,
+    updatedAt: nightMode?.finishedAt ?? nightMode?.startedAt,
+    hasSelectedIssues: selectedIssues.length > 0,
+  });
+
+  if (current.state !== canonicalState) {
+    try {
+      current = applyRunTransition(current, {
+        to: canonicalState,
+        at: nightMode?.finishedAt ?? nightMode?.startedAt ?? new Date().toISOString(),
+        source: "derived",
+        reason: "legacy-bridge-selected-issues",
+      });
+    } catch {
+      current = {
+        state: canonicalState,
+        stateHistory: current.stateHistory,
+        stateUpdatedAt: coerceTimestamp(nightMode?.finishedAt, nightMode?.startedAt),
+      };
+    }
+  }
 
   return {
-    version: 1,
+    version: 2,
     updatedAt: new Date().toISOString(),
     runId: existingRun.runId.startsWith("cf-") ? existingRun.runId : `cf-${nightMode?.startedAt ?? new Date().toISOString()}`,
     mode: inferredMode,
     targetRepo,
     baseBranch: selectedIssueStates[0]?.baseBranch || existingRun.baseBranch || intake.baseBranch,
     selectedIssues,
-    status,
+    status: legacyRunStatusFromState(current.state, { hasSelectedIssues: selectedIssues.length > 0 }),
+    state: current.state,
+    stateUpdatedAt: current.stateUpdatedAt,
+    stateHistory: current.stateHistory,
   };
 }
 
@@ -502,32 +731,51 @@ function finalizeRunState(
   allIssues: IssueState[],
   nightMode: NightModeState | null,
 ): CodingFactoryRunState {
-  if (run.status !== "running") {
-    return run;
-  }
-
   const selectedIssueStates = selectIssuesByKey(allIssues, run.selectedIssues);
-  const hasSelectedIssues = run.selectedIssues.length > 0;
-  const allSelectedIssuesTerminal = hasSelectedIssues
-    && selectedIssueStates.length === run.selectedIssues.length
-    && selectedIssueStates.every((issue) => TERMINAL_PHASES.has(issue.phase));
+  const canonicalState = resolveRunStateFromIssues({
+    currentState: run.state,
+    selectedIssueStates: selectedIssueStates.map((issue) => issue.state),
+    isNightModeRunning: nightMode?.status === "running",
+    finishedAt: nightMode?.finishedAt ?? null,
+  });
 
-  const status: CodingFactoryRunStatus = allSelectedIssuesTerminal || !!nightMode?.finishedAt
-    ? "completed"
-    : hasSelectedIssues
-      ? "unknown"
-      : "idle";
+  let current = {
+    state: run.state,
+    stateHistory: [...run.stateHistory],
+    stateUpdatedAt: run.stateUpdatedAt,
+  };
+
+  if (current.state !== canonicalState) {
+    try {
+      current = applyRunTransition(current, {
+        to: canonicalState,
+        at: nightMode?.finishedAt ?? selectedIssueStates[0]?.updatedAt ?? run.updatedAt,
+        source: "derived",
+        reason: "resolved-from-selected-issues",
+      });
+    } catch {
+      current = {
+        state: canonicalState,
+        stateHistory: current.stateHistory,
+        stateUpdatedAt: coerceTimestamp(nightMode?.finishedAt, selectedIssueStates[0]?.updatedAt, run.updatedAt),
+      };
+    }
+  }
 
   return {
     ...run,
     updatedAt: new Date().toISOString(),
-    status,
+    status: legacyRunStatusFromState(current.state, { hasSelectedIssues: run.selectedIssues.length > 0 }),
+    state: current.state,
+    stateUpdatedAt: current.stateUpdatedAt,
+    stateHistory: current.stateHistory,
   };
 }
 
 async function resolveRunState(
   intake: CodingFactoryIntakeState,
   nightMode: NightModeState | null,
+  supervisor: CodingFactorySupervisorHealth,
   isNightModeRunning: boolean,
   allIssues: IssueState[],
 ): Promise<{
@@ -537,6 +785,49 @@ async function resolveRunState(
 }> {
   const existingRun = await readPersistedRunState(intake);
   const persistedOrDraft = existingRun ?? createDraftRunState(intake, intake.selectedIssues.length > 0 ? "draft" : "idle");
+
+  const hasAttachedSupervisorRun = Boolean(
+    existingRun
+      && supervisor.isHealthy
+      && supervisor.runId
+      && supervisor.runId === existingRun.runId,
+  );
+
+  if (existingRun && hasAttachedSupervisorRun) {
+    let activeRun = finalizeRunState(existingRun, allIssues, nightMode);
+
+    if (activeRun.state !== "running") {
+      try {
+        const next = applyRunTransition(activeRun, {
+          to: "running",
+          at: nightMode?.startedAt ?? supervisor.startedAt ?? new Date().toISOString(),
+          source: "derived",
+          reason: "supervisor-attached",
+        });
+
+        activeRun = {
+          ...activeRun,
+          status: "running",
+          state: next.state,
+          stateUpdatedAt: next.stateUpdatedAt,
+          stateHistory: next.stateHistory,
+        };
+      } catch {
+        activeRun = {
+          ...activeRun,
+          status: "running",
+          state: "running",
+          stateUpdatedAt: supervisor.startedAt ?? new Date().toISOString(),
+        };
+      }
+    }
+
+    return {
+      run: existingRun,
+      activeRun,
+      runSource: "persisted",
+    };
+  }
 
   if (isNightModeRunning || nightMode?.status === "running") {
     return {
@@ -569,6 +860,10 @@ export async function listAvailableIssues(options: ListAvailableIssuesOptions = 
     .filter((issue) => !options.targetRepo || issue.repo === options.targetRepo)
     .filter((issue) => !excludeKeys.has(issue.issueKey))
     .sort((a, b) => {
+      const aTerminal = isTerminalIssueState(a.state) ? 1 : 0;
+      const bTerminal = isTerminalIssueState(b.state) ? 1 : 0;
+      if (aTerminal !== bTerminal) return aTerminal - bTerminal;
+
       const timeDelta = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
       if (timeDelta !== 0) return timeDelta;
       return a.issue - b.issue;
@@ -580,31 +875,145 @@ export async function listAvailableIssues(options: ListAvailableIssuesOptions = 
       title: issue.title,
       baseBranch: issue.baseBranch,
       phase: issue.phase,
+      state: issue.state,
       updatedAt: issue.updatedAt,
     }));
 }
 
+function isValidSupervisorState(input: unknown): input is CodingFactorySupervisorState {
+  if (!input || typeof input !== "object") return false;
+
+  const payload = input as Record<string, unknown>;
+  return typeof payload.runId === "string"
+    && typeof payload.status === "string"
+    && ["running", "finished", "failed"].includes(payload.status)
+    && typeof payload.targetRepo === "string"
+    && typeof payload.baseBranch === "string"
+    && Array.isArray(payload.issueKeys)
+    && Array.isArray(payload.issueNumbers)
+    && Array.isArray(payload.command)
+    && typeof payload.logPath === "string"
+    && typeof payload.updatedAt === "string";
+}
+
+export async function readSupervisorState(): Promise<CodingFactorySupervisorState | null> {
+  const state = await readJson<unknown>(CODING_FACTORY_SUPERVISOR_PATH);
+  if (!isValidSupervisorState(state)) {
+    return null;
+  }
+
+  return {
+    ...state,
+    version: 1,
+    startedAt: typeof state.startedAt === "string" ? state.startedAt : state.updatedAt,
+  };
+}
+
+function isProcessAlive(pid: number | null | undefined): boolean {
+  if (!Number.isInteger(pid) || !pid || pid <= 0) return false;
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function readSupervisorHealth(): Promise<CodingFactorySupervisorHealth> {
+  const state = await readSupervisorState();
+  const pidAlive = isProcessAlive(state?.pid ?? null);
+  const fallbackNightModeProcess = !pidAlive && await checkNightModeProcessRunning();
+
+  if (!state) {
+    return {
+      status: fallbackNightModeProcess ? "running" : "absent",
+      isHealthy: false,
+      pid: null,
+      pidAlive: false,
+      runId: null,
+      source: null,
+      targetRepo: null,
+      baseBranch: null,
+      issueKeys: [],
+      issueNumbers: [],
+      logPath: null,
+      startedAt: null,
+      finishedAt: null,
+      updatedAt: null,
+      fallbackNightModeProcess,
+      fallbackUsed: fallbackNightModeProcess,
+    };
+  }
+
+  const status: CodingFactorySupervisorStatus = state.status === "running"
+    ? (pidAlive ? "running" : "stale")
+    : state.status;
+
+  return {
+    status,
+    isHealthy: status === "running" && pidAlive,
+    pid: state.pid,
+    pidAlive,
+    runId: state.runId,
+    source: state.source,
+    targetRepo: state.targetRepo,
+    baseBranch: state.baseBranch,
+    issueKeys: [...state.issueKeys],
+    issueNumbers: [...state.issueNumbers],
+    logPath: state.logPath,
+    startedAt: state.startedAt,
+    finishedAt: state.finishedAt ?? null,
+    updatedAt: state.updatedAt,
+    fallbackNightModeProcess,
+    fallbackUsed: !pidAlive && fallbackNightModeProcess,
+  };
+}
+
 export async function getCodingFactoryStatus(): Promise<CodingFactoryStatus> {
-  const [nightMode, isRunning, allIssues, intake] = await Promise.all([
+  const [nightMode, allIssues, intake, supervisor] = await Promise.all([
     readJson<NightModeState>(NIGHT_MODE_STATE_PATH),
-    checkNightModeProcessRunning(),
     readIssueStates(),
     readIntakeState(),
+    readSupervisorHealth(),
   ]);
 
-  const { run, activeRun, runSource } = await resolveRunState(intake, nightMode, isRunning, allIssues);
+  const isNightModeRunning = supervisor.isHealthy
+    ? false
+    : Boolean(supervisor.fallbackNightModeProcess || nightMode?.status === "running");
+
+  const { run, activeRun, runSource } = await resolveRunState(
+    intake,
+    nightMode,
+    supervisor,
+    isNightModeRunning,
+    allIssues,
+  );
   const issues = sortIssues(selectIssuesByKey(allIssues, activeRun.selectedIssues));
+  const isRunning = supervisor.isHealthy || isNightModeRunning;
 
   return {
     isRunning,
-    status: nightMode?.status ?? activeRun.status ?? "unknown",
+    status: isRunning ? (nightMode?.status ?? activeRun.status ?? "running") : (nightMode?.status ?? activeRun.status ?? "unknown"),
+    state: activeRun.state,
     integrationBranch: nightMode?.integrationBranch ?? null,
-    startedAt: nightMode?.startedAt ?? null,
-    finishedAt: nightMode?.finishedAt ?? null,
+    startedAt: nightMode?.startedAt ?? supervisor.startedAt ?? null,
+    finishedAt: nightMode?.finishedAt ?? supervisor.finishedAt ?? null,
     issues,
     stats: computeStats(issues),
     run,
     activeRun,
     runSource,
+    supervisor,
+    stateMachine: {
+      runStates: RUN_STATES,
+      issueStates: ISSUE_STATES,
+    },
   };
 }
+
+export {
+  applyIssueTransition,
+  applyRunTransition,
+  inferIssueStateFromLegacyTopLevel,
+};

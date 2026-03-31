@@ -30,6 +30,10 @@ export async function GET() {
       ...status,
       intake,
       availableIssues,
+      meta: {
+        stateMachineVersion: 1,
+        canonicalRunState: status.state,
+      },
     }));
   } catch (err) {
     return NextResponse.json(apiError(String(err)), { status: 500 });
