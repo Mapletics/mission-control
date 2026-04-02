@@ -76,6 +76,8 @@ const ISSUE_TRANSITIONS: Record<CodingFactoryIssueStateName, readonly CodingFact
 
 const RUN_TERMINAL_STATES = new Set<CodingFactoryRunStateName>(["completed", "blocked", "failed", "cancelled", "stuck"]);
 const ISSUE_TERMINAL_STATES = new Set<CodingFactoryIssueStateName>(["completed", "blocked", "failed", "cancelled", "stuck"]);
+const ISSUE_COMPLETED_STATES = new Set<CodingFactoryIssueStateName>(["completed", "pr_created"]);
+const ISSUE_ACTIVE_WORK_STATES = new Set<CodingFactoryIssueStateName>(["implementing", "reviewing", "fixing", "approved"]);
 
 function isValidDate(value: string | undefined): value is string {
   return !!value && !Number.isNaN(new Date(value).getTime());
@@ -99,6 +101,14 @@ export function isTerminalRunState(state: CodingFactoryRunStateName): boolean {
 
 export function isTerminalIssueState(state: CodingFactoryIssueStateName): boolean {
   return ISSUE_TERMINAL_STATES.has(state);
+}
+
+export function isCompletedIssueState(state: CodingFactoryIssueStateName): boolean {
+  return ISSUE_COMPLETED_STATES.has(state);
+}
+
+export function isActiveIssueState(state: CodingFactoryIssueStateName): boolean {
+  return ISSUE_ACTIVE_WORK_STATES.has(state);
 }
 
 export function legacyRunStatusFromState(
@@ -529,13 +539,13 @@ export function resolveRunStateFromIssues(input: {
     return input.currentState === "completed" ? "completed" : "created";
   }
 
-  if (states.every((state) => state === "completed")) return "completed";
+  if (states.every((state) => isCompletedIssueState(state))) return "completed";
 
   if (states.some((state) => state === "failed")) return "failed";
   if (states.some((state) => state === "blocked")) return "blocked";
   if (states.some((state) => state === "stuck")) return "stuck";
 
-  const hasActiveWork = states.some((state) => state === "implementing" || state === "reviewing" || state === "fixing" || state === "approved" || state === "pr_created");
+  const hasActiveWork = states.some((state) => isActiveIssueState(state));
   if (hasActiveWork) {
     return "running";
   }

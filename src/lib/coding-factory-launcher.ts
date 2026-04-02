@@ -25,7 +25,44 @@ const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const BRANCH_PATTERN = /^[A-Za-z0-9._\/-]+$/;
 const LEGACY_NIGHT_MODE_SCRIPT = process.env.CODING_FACTORY_NIGHT_MODE_SCRIPT || "/home/ubuntu/dev-handbook/automation/old_night-mode.sh";
 const DEFAULT_LOG_DIR = process.env.CODING_FACTORY_LOG_DIR || "/tmp";
-const ALLOWED_TARGET_REPO = process.env.CODING_FACTORY_ALLOWED_REPO || DEFAULT_TARGET_REPO;
+
+const ALLOWED_REPOS_RAW =
+  process.env.CODING_FACTORY_ALLOWED_REPOS ||
+  process.env.CODING_FACTORY_ALLOWED_REPO ||
+  DEFAULT_TARGET_REPO;
+
+const ALLOWED_TARGET_REPOS: ReadonlySet<string> = new Set(
+  ALLOWED_REPOS_RAW
+    .split(",")
+    .map((repo) => repo.trim())
+    .filter(Boolean),
+);
+
+type TargetRepoKind = "flutter" | "web";
+
+const WEB_WORK_ISSUE_SCRIPT =
+  process.env.CODING_FACTORY_WEB_SCRIPT ||
+  "/home/ubuntu/dev-handbook/automation/work-issue-web.sh";
+
+const REPO_KIND_BY_SLUG: Record<string, TargetRepoKind> = {
+  "Mapletics/App_frontend": "flutter",
+  "Mapletics/mapletics-dashboard": "web",
+  "Mapletics/mapletics-website": "web",
+};
+
+function getTargetRepoKind(targetRepo: string): TargetRepoKind {
+  return REPO_KIND_BY_SLUG[targetRepo] ?? "web";
+}
+
+function getLauncherScriptPath(targetRepo: string): string {
+  return getTargetRepoKind(targetRepo) === "flutter"
+    ? LEGACY_NIGHT_MODE_SCRIPT
+    : WEB_WORK_ISSUE_SCRIPT;
+}
+
+export function getAllowedTargetRepos(): string[] {
+  return [...ALLOWED_TARGET_REPOS];
+}
 
 export type LaunchSource = "start" | "resume";
 
@@ -34,6 +71,7 @@ export type CodingFactoryLaunchInput = {
   targetRepo: string;
   baseBranch: string;
   selectedIssues: IssueRef[];
+  launchIssues?: IssueRef[];
   runId?: string;
   source: LaunchSource;
 };
@@ -43,23 +81,44 @@ export type CodingFactoryLaunchResult = {
   supervisor: CodingFactorySupervisorState;
 };
 
+function getLaunchIssues(input: CodingFactoryLaunchInput): IssueRef[] {
+  return input.launchIssues ?? input.selectedIssues;
+}
+
 function validateLaunchInput(input: CodingFactoryLaunchInput): string | null {
   if (!REPO_PATTERN.test(input.targetRepo)) return "Invalid targetRepo (expected owner/repo).";
   if (!BRANCH_PATTERN.test(input.baseBranch)) return "Invalid baseBranch.";
-  if (input.targetRepo !== ALLOWED_TARGET_REPO) {
-    return `Unsupported targetRepo for v1 launcher: ${input.targetRepo}. Expected ${ALLOWED_TARGET_REPO}.`;
+  if (!ALLOWED_TARGET_REPOS.has(input.targetRepo)) {
+    const allowedRepos = [...ALLOWED_TARGET_REPOS].join(", ");
+    return `Unsupported targetRepo: ${input.targetRepo}. Allowed repos: ${allowedRepos}.`;
   }
   if (!Array.isArray(input.selectedIssues) || input.selectedIssues.length === 0) {
     return "At least one selected issue is required.";
   }
-  if (input.selectedIssues.some((issue) => issue.repo !== input.targetRepo)) {
+  const launchIssues = getLaunchIssues(input);
+  if (!Array.isArray(launchIssues) || launchIssues.length === 0) {
+    return "At least one launch issue is required.";
+  }
+  if (input.selectedIssues.some((issue) => issue.repo !== input.targetRepo) || launchIssues.some((issue) => issue.repo !== input.targetRepo)) {
     return "Selected issues must all belong to the exact targetRepo.";
+  }
+  const selectedIssueKeys = new Set(input.selectedIssues.map((issue) => issue.issueKey));
+  if (launchIssues.some((issue) => !selectedIssueKeys.has(issue.issueKey))) {
+    return "Launch issues must be a subset of the persisted run selection.";
   }
   return null;
 }
 
-async function ensureScriptExists(): Promise<void> {
-  await access(LEGACY_NIGHT_MODE_SCRIPT);
+async function ensureScriptExists(targetRepo: string): Promise<void> {
+  const scriptPath = getLauncherScriptPath(targetRepo);
+  try {
+    await access(scriptPath);
+  } catch {
+    throw new Error(
+      `Launcher script not found for repo "${targetRepo}": ${scriptPath}. ` +
+      `Check CODING_FACTORY_NIGHT_MODE_SCRIPT or CODING_FACTORY_WEB_SCRIPT.`,
+    );
+  }
 }
 
 function buildRunId(): string {
@@ -67,10 +126,11 @@ function buildRunId(): string {
 }
 
 function buildCommand(input: CodingFactoryLaunchInput): string[] {
+  const scriptPath = getLauncherScriptPath(input.targetRepo);
   return [
     "bash",
-    LEGACY_NIGHT_MODE_SCRIPT,
-    ...input.selectedIssues.map((issue) => String(issue.issue)),
+    scriptPath,
+    ...getLaunchIssues(input).map((issue) => String(issue.issue)),
     "--base",
     input.baseBranch,
     "--repo",
@@ -78,7 +138,7 @@ function buildCommand(input: CodingFactoryLaunchInput): string[] {
   ];
 }
 
-function queueAndStartRunState(
+function queueRunState(
   draft: CodingFactoryRunState,
   at: string,
   reason: string,
@@ -111,7 +171,26 @@ function queueAndStartRunState(
     });
   }
 
-  current = applyRunTransition(current, {
+  return {
+    ...draft,
+    updatedAt: at,
+    status: "draft",
+    state: current.state,
+    stateUpdatedAt: current.stateUpdatedAt,
+    stateHistory: current.stateHistory,
+  };
+}
+
+function markRunRunning(
+  draft: CodingFactoryRunState,
+  at: string,
+  reason: string,
+): CodingFactoryRunState {
+  const current = applyRunTransition({
+    state: draft.state,
+    stateHistory: [...draft.stateHistory],
+    stateUpdatedAt: draft.stateUpdatedAt,
+  }, {
     to: "running",
     at,
     source: "api",
@@ -157,6 +236,7 @@ function createSupervisorState(
   command: string[],
 ): CodingFactorySupervisorState {
   const now = new Date().toISOString();
+  const launchIssues = getLaunchIssues(input);
   return {
     version: 1,
     runId: run.runId,
@@ -165,8 +245,9 @@ function createSupervisorState(
     pid,
     targetRepo: input.targetRepo,
     baseBranch: input.baseBranch,
-    issueKeys: input.selectedIssues.map((issue) => issue.issueKey),
-    issueNumbers: input.selectedIssues.map((issue) => issue.issue),
+    issueKeys: launchIssues.map((issue) => issue.issueKey),
+    issueNumbers: launchIssues.map((issue) => issue.issue),
+    selectedIssues: launchIssues,
     command,
     logPath,
     startedAt: now,
@@ -174,11 +255,23 @@ function createSupervisorState(
   };
 }
 
+async function cleanupSpawnedProcess(pid: number): Promise<void> {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return;
+  }
+
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    // best-effort cleanup only
+  }
+}
+
 export async function launchCodingFactoryRun(input: CodingFactoryLaunchInput): Promise<CodingFactoryLaunchResult> {
   const validationError = validateLaunchInput(input);
   if (validationError) throw new Error(validationError);
 
-  await ensureScriptExists();
+  await ensureScriptExists(input.targetRepo);
 
   const supervisorHealth = await readSupervisorHealth();
   if (supervisorHealth.isHealthy || supervisorHealth.fallbackNightModeProcess) {
@@ -210,18 +303,50 @@ export async function launchCodingFactoryRun(input: CodingFactoryLaunchInput): P
         runId: input.runId || buildRunId(),
       };
 
-  const preparedRun = queueAndStartRunState(runBase, now, input.source);
+  const queuedRun = await saveRunState(queueRunState(runBase, now, input.source), draftInput);
   const command = buildCommand(input);
-  const logPath = join(DEFAULT_LOG_DIR, `coding-factory-${preparedRun.runId}.log`);
+  const logPath = join(DEFAULT_LOG_DIR, `coding-factory-${queuedRun.runId}.log`);
   const pid = await spawnDetached(command, logPath);
 
   if (!pid) {
     throw new Error("Failed to start Coding Factory launcher process.");
   }
 
-  const run = await saveRunState(preparedRun, draftInput);
-  const supervisor = await saveSupervisorState(createSupervisorState(input, run, pid, logPath, command));
-  return { run, supervisor };
+  let persistedRun = queuedRun;
+
+  try {
+    persistedRun = await saveRunState(markRunRunning(queuedRun, now, input.source), draftInput);
+    const supervisor = await saveSupervisorState(createSupervisorState(input, persistedRun, pid, logPath, command));
+    return { run: persistedRun, supervisor };
+  } catch (error) {
+    await cleanupSpawnedProcess(pid);
+
+    try {
+      const stuckRun = applyRunTransition({
+        state: persistedRun.state,
+        stateHistory: [...persistedRun.stateHistory],
+        stateUpdatedAt: persistedRun.stateUpdatedAt,
+      }, {
+        to: "stuck",
+        at: new Date().toISOString(),
+        source: "api",
+        reason: `${input.source}-launch-persist-failed`,
+      });
+
+      await saveRunState({
+        ...persistedRun,
+        updatedAt: new Date().toISOString(),
+        status: "unknown",
+        state: stuckRun.state,
+        stateUpdatedAt: stuckRun.stateUpdatedAt,
+        stateHistory: stuckRun.stateHistory,
+      }, draftInput);
+    } catch {
+      // best-effort state repair only
+    }
+
+    throw error;
+  }
 }
 
 export async function buildResumeLaunchInput(runId: string): Promise<CodingFactoryLaunchInput> {
@@ -269,7 +394,8 @@ export async function buildResumeLaunchInput(runId: string): Promise<CodingFacto
     mode: run.mode,
     targetRepo: run.targetRepo,
     baseBranch: run.baseBranch,
-    selectedIssues: resumableIssues,
+    selectedIssues: run.selectedIssues,
+    launchIssues: resumableIssues,
     runId: run.runId,
     source: "resume",
   };

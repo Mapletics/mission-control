@@ -42,6 +42,34 @@ type CodingFactoryIntakeProps = {
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const BRANCH_PATTERN = /^[A-Za-z0-9._\/-]+$/;
 
+type RepoOption = {
+  value: string;
+  label: string;
+  defaultBranch: string;
+  kind: "flutter" | "web";
+};
+
+const REPO_OPTIONS: RepoOption[] = [
+  {
+    value: "Mapletics/App_frontend",
+    label: "App_frontend (Flutter)",
+    defaultBranch: "dev",
+    kind: "flutter",
+  },
+  {
+    value: "Mapletics/mapletics-dashboard",
+    label: "mapletics-dashboard (Web)",
+    defaultBranch: "main",
+    kind: "web",
+  },
+  {
+    value: "Mapletics/mapletics-website",
+    label: "mapletics-website (Web)",
+    defaultBranch: "main",
+    kind: "web",
+  },
+];
+
 function validateRepo(value: string): string | null {
   if (!value.trim()) return "Repo is required (e.g. owner/repo)";
   if (!REPO_PATTERN.test(value.trim())) return "Invalid format — use owner/repo";
@@ -129,9 +157,10 @@ export function CodingFactoryIntake({
 
   const handleTargetRepoChange = (targetRepo: string) => {
     const trimmedTargetRepo = targetRepo.trim();
-    const shouldClearIssues =
-      trimmedTargetRepo !== intake.targetRepo.trim() &&
-      intake.selectedIssues.some((issue) => issue.repo !== trimmedTargetRepo || trimmedTargetRepo.length > 0);
+    const previousRepo = intake.targetRepo.trim();
+    const repoChanged = trimmedTargetRepo !== previousRepo;
+
+    const shouldClearIssues = repoChanged && intake.selectedIssues.length > 0;
 
     if (shouldClearIssues) {
       setRepoChangeNotice("Selected issues cleared — repo changed.");
@@ -139,9 +168,15 @@ export function CodingFactoryIntake({
       setRepoChangeNotice(null);
     }
 
+    const repoOption = REPO_OPTIONS.find((option) => option.value === trimmedTargetRepo);
+    const nextBaseBranch = repoChanged && repoOption
+      ? repoOption.defaultBranch
+      : intake.baseBranch;
+
     commit({
       ...intake,
       targetRepo,
+      baseBranch: nextBaseBranch,
       selectedIssues: shouldClearIssues ? [] : intake.selectedIssues,
     });
   };
@@ -228,13 +263,23 @@ export function CodingFactoryIntake({
         {/* Target repo */}
         <div className="min-w-0 flex-1">
           <div className="relative">
-            <FolderGit2 className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-stone-400 dark:text-[#7a8591]" />
-            <Input
+            <FolderGit2 className="pointer-events-none absolute left-3 top-1/2 z-10 h-3.5 w-3.5 -translate-y-1/2 text-stone-400 dark:text-[#7a8591]" />
+            <select
               value={intake.targetRepo}
               onChange={(event) => handleTargetRepoChange(event.target.value)}
-              placeholder="owner/repo"
-              className={cn("pl-9", targetRepoError && "border-red-300 dark:border-red-500/40")}
-            />
+              className={cn(
+                "flex h-10 w-full rounded-md border border-input bg-background pl-9 pr-3 py-2 text-sm ring-offset-background",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                "disabled:cursor-not-allowed disabled:opacity-50",
+                targetRepoError && "border-red-300 dark:border-red-500/40",
+              )}
+            >
+              {REPO_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
           </div>
           <InlineError message={targetRepoError} />
           {repoChangeNotice && (
