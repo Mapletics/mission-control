@@ -58,94 +58,61 @@ export function CodingFactoryRunSummary({
 }: CodingFactoryRunSummaryProps) {
   const summaryRun = activeRun;
   const statusLabel = isRunning ? status : summaryRun.status;
-  const heading = isRunning
-    ? runSource === "legacy-bridge"
-      ? "Active legacy-bridged run"
-      : "Active factory run"
-    : run.status === "draft" || run.status === "idle"
-      ? "Prepared factory draft"
-      : "Last persisted factory run";
-
-  const description = runSource === "legacy-bridge"
-    ? "Legacy Night Mode is active. This panel mirrors the legacy issue set for display only; coding-factory-run.json is left untouched on polling."
-    : "Coding Factory keeps the persisted run record separate from the intake draft and only uses issueKey-scoped issue selection.";
 
   return (
     <section className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm dark:border-[#2c343d] dark:bg-[#171a1d]">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
-          <span className="relative flex h-3 w-3">
+      {/* Status row */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2.5">
+          <span className="relative flex h-2.5 w-2.5">
             {isRunning ? (
               <>
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex h-3 w-3 rounded-full bg-emerald-500" />
+                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
               </>
             ) : (
-              <span className="relative inline-flex h-3 w-3 rounded-full bg-stone-300 dark:bg-stone-600" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-stone-300 dark:bg-stone-600" />
             )}
           </span>
-          <div>
-            <p className="text-sm font-semibold text-stone-900 dark:text-[#f5f7fa]">
-              {heading}
-            </p>
-            <p className="mt-1 text-sm text-stone-500 dark:text-[#8d98a5]">
-              {description}
-            </p>
-          </div>
+          <span className="text-sm font-semibold text-stone-900 dark:text-[#f5f7fa]">
+            {isRunning ? "Running" : "Draft"}
+          </span>
+          <span
+            className={cn(
+              "rounded-full px-2 py-0.5 text-[10px] font-medium",
+              statusLabel === "running"
+                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
+                : statusLabel === "draft"
+                  ? "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300"
+                  : "bg-stone-100 text-stone-600 dark:bg-stone-700/60 dark:text-stone-300",
+            )}
+          >
+            {statusLabel}
+          </span>
         </div>
 
-        <span
-          className={cn(
-            "rounded-full px-2.5 py-1 text-xs font-medium",
-            statusLabel === "running"
-              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
-              : statusLabel === "draft"
-                ? "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300"
-                : "bg-stone-100 text-stone-600 dark:bg-stone-700/60 dark:text-stone-300",
+        {/* Compact metadata */}
+        <div className="flex items-center gap-3 text-xs text-stone-400 dark:text-[#7a8591]">
+          <span className="flex items-center gap-1">
+            <GitBranch className="h-3 w-3" /> {summaryRun.baseBranch}
+          </span>
+          <span>{summaryRun.selectedIssues.length} issues</span>
+          {startedAt && (
+            <span className="flex items-center gap-1">
+              <Clock className="h-3 w-3" /> {formatElapsed(startedAt)}
+            </span>
           )}
-        >
-          {statusLabel}
-        </span>
+        </div>
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-stone-500 dark:text-[#8d98a5]">
-        <span className="flex items-center gap-1">
-          <ExternalLink className="h-3 w-3" /> persisted {run.runId}
-        </span>
-        <span className="flex items-center gap-1">
-          <CircleDot className="h-3 w-3" /> source {runSource}
-        </span>
-        <span className="flex items-center gap-1">
-          <ExternalLink className="h-3 w-3" /> repo {summaryRun.targetRepo}
-        </span>
-        <span className="flex items-center gap-1">
-          <GitBranch className="h-3 w-3" /> base {summaryRun.baseBranch}
-        </span>
-        <span className="flex items-center gap-1">
-          <CircleDot className="h-3 w-3" /> {summaryRun.mode}
-        </span>
-        <span className="flex items-center gap-1">
-          <CircleDot className="h-3 w-3" /> {summaryRun.selectedIssues.length} selected
-        </span>
-        {integrationBranch && (
-          <span className="flex items-center gap-1">
-            <GitBranch className="h-3 w-3" /> legacy integration {integrationBranch}
-          </span>
-        )}
-        {startedAt && (
-          <span className="flex items-center gap-1">
-            <Clock className="h-3 w-3" /> Started {formatTime(startedAt)} ({formatElapsed(startedAt)})
-          </span>
-        )}
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-stone-100 pt-3 dark:border-[#23282e]">
+      {/* Stats row */}
+      <div className="mt-3 flex flex-wrap items-center gap-4 border-t border-stone-100 pt-3 dark:border-[#23282e]">
         <StatBadge icon={CircleDot} label="Total" value={stats.total} />
-        <StatBadge icon={CheckCircle2} label="Completed" value={stats.completed} color="text-emerald-600 dark:text-emerald-400" />
+        <StatBadge icon={CheckCircle2} label="Done" value={stats.completed} color="text-emerald-600 dark:text-emerald-400" />
+        <StatBadge icon={RefreshCw} label="Active" value={stats.inProgress} color="text-blue-600 dark:text-blue-400" />
         <StatBadge icon={AlertCircle} label="Failed" value={stats.failed} color="text-red-600 dark:text-red-400" />
         <StatBadge icon={Ban} label="Blocked" value={stats.blocked} color="text-red-600 dark:text-red-400" />
-        <StatBadge icon={RefreshCw} label="In Progress" value={stats.inProgress} color="text-blue-600 dark:text-blue-400" />
-        <StatBadge icon={ExternalLink} label="PRs Created" value={stats.prsCreated} color="text-purple-600 dark:text-purple-400" />
+        <StatBadge icon={ExternalLink} label="PRs" value={stats.prsCreated} color="text-purple-600 dark:text-purple-400" />
       </div>
     </section>
   );

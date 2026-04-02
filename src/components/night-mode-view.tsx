@@ -6,11 +6,11 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Cog,
   ExternalLink,
   FileText,
   GitBranch,
   Info,
-  Moon,
   RefreshCw,
   X,
 } from "lucide-react";
@@ -270,16 +270,12 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issue: Pick
             )}
           </div>
           <p className="mt-1 text-sm text-stone-700 dark:text-[#c7d0d9]">{issue.title}</p>
-          <p className="mt-0.5 text-xs text-stone-400 dark:text-[#7a8591]">{issue.issueKey}</p>
-          <div className="mt-2 flex flex-wrap gap-2 text-xs text-stone-500 dark:text-[#8d98a5]">
-            <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 dark:bg-[#20252a]">
-              <GitBranch className="h-3 w-3" /> branch {issue.branch}
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-400 dark:text-[#7a8591]">
+            <span className="inline-flex items-center gap-1">
+              <GitBranch className="h-3 w-3" /> {issue.branch}
             </span>
-            <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 dark:bg-[#20252a]">
-              <GitBranch className="h-3 w-3" /> base {issue.baseBranch}
-            </span>
-            <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 dark:bg-[#20252a]">
-              <Clock className="h-3 w-3" /> updated {formatUpdatedAt(issue.updatedAt)}
+            <span className="inline-flex items-center gap-1">
+              <Clock className="h-3 w-3" /> {formatUpdatedAt(issue.updatedAt)}
             </span>
           </div>
         </div>
@@ -484,11 +480,10 @@ export function NightModeView({ legacy }: { legacy?: boolean }) {
       <SectionHeader
         title={
           <span className="flex items-center gap-2.5">
-            <Moon className="h-6 w-6" />
+            <Cog className="h-5 w-5" />
             Coding Factory
           </span>
         }
-        description="Dashboard-driven issue automation with explicit v1 draft/run state on top of the existing Night Mode engine"
         actions={
           <button
             type="button"
@@ -560,11 +555,8 @@ export function NightModeView({ legacy }: { legacy?: boolean }) {
             />
 
             {data.issues.length === 0 ? (
-              <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-stone-200 py-12 text-sm text-stone-500 dark:border-[#2c343d] dark:text-[#8d98a5]">
-                <p>No active issues in the current Coding Factory run.</p>
-                <p className="mt-1 text-xs text-stone-400 dark:text-[#7a8591]">
-                  Historical issue state files stay visible above in the intake picker and are no longer used as an implicit active fallback.
-                </p>
+              <div className="flex items-center justify-center rounded-xl border border-dashed border-stone-200 py-10 text-sm text-stone-400 dark:border-[#2c343d] dark:text-[#7a8591]">
+                No active issues in the current run.
               </div>
             ) : (
               data.issues.map((issue) => (
