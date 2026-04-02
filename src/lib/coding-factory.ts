@@ -9,6 +9,7 @@ import {
   deriveIssueStateHistory,
   deriveRunStateHistory,
   inferIssueStateFromLegacyTopLevel,
+  isCompletedIssueState,
   isIssueState,
   isRunState,
   isTerminalIssueState,
@@ -127,6 +128,7 @@ export type CodingFactorySupervisorState = {
   baseBranch: string;
   issueKeys: string[];
   issueNumbers: number[];
+  selectedIssues?: IssueRef[];
   command: string[];
   logPath: string;
   startedAt: string;
@@ -491,10 +493,10 @@ export async function checkNightModeProcessRunning(): Promise<boolean> {
 export function computeStats(issues: IssueState[]): CodingFactoryStats {
   return {
     total: issues.length,
-    completed: issues.filter((issue) => issue.state === "completed" || issue.state === "pr_created").length,
+    completed: issues.filter((issue) => isCompletedIssueState(issue.state)).length,
     failed: issues.filter((issue) => issue.state === "failed" || issue.state === "cancelled").length,
     blocked: issues.filter((issue) => issue.state === "blocked" || issue.state === "stuck").length,
-    inProgress: issues.filter((issue) => !isTerminalIssueState(issue.state)).length,
+    inProgress: issues.filter((issue) => !isTerminalIssueState(issue.state) && !isCompletedIssueState(issue.state)).length,
     prsCreated: issues.filter((issue) => issue.state === "pr_created" || !!issue.prUrl).length,
   };
 }
@@ -671,6 +673,7 @@ function buildLegacyBridgeRunState(
   nightMode: NightModeState | null,
   allIssues: IssueState[],
   existingRun: CodingFactoryRunState,
+  isNightModeRunning: boolean,
 ): CodingFactoryRunState {
   const fallbackRepo = intake.targetRepo || existingRun.targetRepo || existingRun.selectedIssues[0]?.repo || DEFAULT_TARGET_REPO;
   const selectedIssues = buildLegacyIssueRefs(nightMode, allIssues, existingRun, fallbackRepo);
@@ -681,7 +684,7 @@ function buildLegacyBridgeRunState(
   const canonicalState = resolveRunStateFromIssues({
     currentState: nightMode?.state ?? existingRun.state,
     selectedIssueStates: selectedIssueStates.map((issue) => issue.state),
-    isNightModeRunning: nightMode?.status === "running",
+    isNightModeRunning,
     finishedAt: nightMode?.finishedAt ?? null,
   });
 
@@ -730,12 +733,13 @@ function finalizeRunState(
   run: CodingFactoryRunState,
   allIssues: IssueState[],
   nightMode: NightModeState | null,
+  isNightModeRunning = false,
 ): CodingFactoryRunState {
   const selectedIssueStates = selectIssuesByKey(allIssues, run.selectedIssues);
   const canonicalState = resolveRunStateFromIssues({
     currentState: run.state,
     selectedIssueStates: selectedIssueStates.map((issue) => issue.state),
-    isNightModeRunning: nightMode?.status === "running",
+    isNightModeRunning,
     finishedAt: nightMode?.finishedAt ?? null,
   });
 
@@ -829,10 +833,10 @@ async function resolveRunState(
     };
   }
 
-  if (isNightModeRunning || nightMode?.status === "running") {
+  if (isNightModeRunning) {
     return {
       run: persistedOrDraft,
-      activeRun: buildLegacyBridgeRunState(intake, nightMode, allIssues, persistedOrDraft),
+      activeRun: buildLegacyBridgeRunState(intake, nightMode, allIssues, persistedOrDraft, isNightModeRunning),
       runSource: "legacy-bridge",
     };
   }
@@ -978,9 +982,7 @@ export async function getCodingFactoryStatus(): Promise<CodingFactoryStatus> {
     readSupervisorHealth(),
   ]);
 
-  const isNightModeRunning = supervisor.isHealthy
-    ? false
-    : Boolean(supervisor.fallbackNightModeProcess || nightMode?.status === "running");
+  const isNightModeRunning = !supervisor.isHealthy && Boolean(supervisor.fallbackNightModeProcess);
 
   const { run, activeRun, runSource } = await resolveRunState(
     intake,
@@ -994,7 +996,7 @@ export async function getCodingFactoryStatus(): Promise<CodingFactoryStatus> {
 
   return {
     isRunning,
-    status: isRunning ? (nightMode?.status ?? activeRun.status ?? "running") : (nightMode?.status ?? activeRun.status ?? "unknown"),
+    status: isRunning ? "running" : (activeRun.status ?? "unknown"),
     state: activeRun.state,
     integrationBranch: nightMode?.integrationBranch ?? null,
     startedAt: nightMode?.startedAt ?? supervisor.startedAt ?? null,
