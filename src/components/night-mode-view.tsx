@@ -14,6 +14,7 @@ import {
   RefreshCw,
   X,
 } from "lucide-react";
+import { CodingFactoryAgents } from "@/components/coding-factory-agents";
 import { CodingFactoryIntake, type AvailableIssue, type IntakeState } from "@/components/coding-factory-intake";
 import { CodingFactoryRunSummary } from "@/components/coding-factory-run-summary";
 import { SectionBody, SectionHeader, SectionLayout } from "@/components/section-layout";
@@ -553,6 +554,8 @@ export function NightModeView({ legacy }: { legacy?: boolean }) {
               activeRun={data.activeRun}
               runSource={data.runSource}
             />
+
+            <CodingFactoryAgents />
 
             {data.issues.length === 0 ? (
               <div className="flex items-center justify-center rounded-xl border border-dashed border-stone-200 py-10 text-sm text-stone-400 dark:border-[#2c343d] dark:text-[#7a8591]">
