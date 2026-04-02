@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { Activity, Bot, Clock, Cpu, Hash, Zap } from "lucide-react";
+import Link from "next/link";
+import { Activity, ArrowRight, Bot, Clock, Cpu, Hash, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSmartPoll } from "@/hooks/use-smart-poll";
 
@@ -88,15 +89,16 @@ export function CodingFactoryAgents() {
     <section className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm dark:border-[#2c343d] dark:bg-[#171a1d]">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
+        <Link href="/coding-factory/agents" className="flex items-center gap-2 group">
           <Bot className="h-4 w-4 text-stone-400 dark:text-[#7a8591]" />
           <h2 className="text-sm font-semibold text-stone-900 dark:text-[#f5f7fa]">Agents</h2>
+          <ArrowRight className="h-3 w-3 text-stone-300 opacity-0 transition-opacity group-hover:opacity-100 dark:text-[#7a8591]" />
           {activeAgents.length > 0 && (
             <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
               {activeAgents.length} active
             </span>
           )}
-        </div>
+        </Link>
 
         {/* Supervisor status */}
         <div className="flex items-center gap-2 text-xs text-stone-400 dark:text-[#7a8591]">
