@@ -6,6 +6,7 @@ import {
   RUN_STATES,
   applyIssueTransition,
   applyRunTransition,
+  coerceIssueState,
   deriveIssueStateHistory,
   deriveRunStateHistory,
   inferIssueStateFromLegacyTopLevel,
@@ -47,6 +48,34 @@ export type IssueRef = {
   title: string;
 };
 
+export type IssueHandoverValidation = {
+  label: string;
+  status: "pending" | "passed" | "failed" | "skipped";
+  details?: string;
+};
+
+export type IssueHandover = {
+  stage: string;
+  codeProduced: boolean;
+  branchCreated: boolean;
+  branch?: string | null;
+  summary?: string;
+  nextAction?: string;
+  updatedAt: string;
+  artifacts?: {
+    researchFile?: string;
+    contractFile?: string;
+    logFile?: string;
+  };
+  comment?: {
+    body: string;
+    posted: boolean;
+    postedAt?: string | null;
+  };
+  changedFiles?: string[];
+  validation?: IssueHandoverValidation[];
+};
+
 export type IssueState = IssueRef & {
   version: number;
   branch: string;
@@ -62,6 +91,7 @@ export type IssueState = IssueRef & {
   updatedAt: string;
   duration?: number | null;
   history: IssueHistory[];
+  handover?: IssueHandover;
 };
 
 export type NightModeState = {
@@ -380,6 +410,74 @@ function normalizeIssueHistory(input: unknown): IssueHistory[] {
   return history.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
 }
 
+function normalizeIssueHandoverValidation(input: unknown): IssueHandoverValidation[] {
+  if (!Array.isArray(input)) return [];
+
+  const items: IssueHandoverValidation[] = [];
+  for (const entry of input) {
+    if (!entry || typeof entry !== "object") continue;
+    const item = entry as Record<string, unknown>;
+    const label = typeof item.label === "string" ? item.label.trim() : "";
+    const status = typeof item.status === "string" ? item.status.trim() : "";
+    if (!label || !["pending", "passed", "failed", "skipped"].includes(status)) continue;
+    items.push({
+      label,
+      status: status as IssueHandoverValidation["status"],
+      details: typeof item.details === "string" ? item.details : undefined,
+    });
+  }
+
+  return items;
+}
+
+function normalizeHandoverStage(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const normalized = input.trim().toLowerCase().replace(/-/g, "_");
+  if (!normalized) return null;
+  return normalized;
+}
+
+function normalizeIssueHandover(input: unknown, fallbackUpdatedAt: string): IssueHandover | undefined {
+  if (!input || typeof input !== "object") return undefined;
+
+  const payload = input as Record<string, unknown>;
+  const stage = normalizeHandoverStage(payload.stage);
+  if (!stage) return undefined;
+
+  const artifacts = payload.artifacts && typeof payload.artifacts === "object"
+    ? payload.artifacts as Record<string, unknown>
+    : null;
+  const comment = payload.comment && typeof payload.comment === "object"
+    ? payload.comment as Record<string, unknown>
+    : null;
+
+  return {
+    stage,
+    codeProduced: payload.codeProduced === true,
+    branchCreated: payload.branchCreated === true,
+    branch: typeof payload.branch === "string" ? payload.branch : undefined,
+    summary: typeof payload.summary === "string" ? payload.summary : undefined,
+    nextAction: typeof payload.nextAction === "string" ? payload.nextAction : undefined,
+    updatedAt: coerceTimestamp(payload.updatedAt, fallbackUpdatedAt),
+    artifacts: artifacts ? {
+      researchFile: typeof artifacts.researchFile === "string" ? artifacts.researchFile : undefined,
+      contractFile: typeof artifacts.contractFile === "string" ? artifacts.contractFile : undefined,
+      logFile: typeof artifacts.logFile === "string" ? artifacts.logFile : undefined,
+    } : undefined,
+    comment: comment && typeof comment.body === "string"
+      ? {
+          body: comment.body,
+          posted: comment.posted === true,
+          postedAt: isIsoDate(comment.postedAt) ? comment.postedAt : null,
+        }
+      : undefined,
+    changedFiles: Array.isArray(payload.changedFiles)
+      ? payload.changedFiles.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      : undefined,
+    validation: normalizeIssueHandoverValidation(payload.validation),
+  };
+}
+
 function normalizeIssueStateRecord(input: unknown): IssueState | null {
   if (!input || typeof input !== "object") return null;
 
@@ -392,7 +490,9 @@ function normalizeIssueStateRecord(input: unknown): IssueState | null {
   const title = typeof payload.title === "string" && payload.title.trim() ? payload.title.trim() : `Issue #${issue}`;
   const history = normalizeIssueHistory(payload.history);
 
-  const persistedStateHistory = normalizePersistedTransitions<CodingFactoryIssueStateName>(payload.stateHistory, isIssueState);
+  const persistedStateHistory = normalizePersistedTransitions<CodingFactoryIssueStateName>(payload.stateHistory, isIssueState, {
+    coerce: coerceIssueState,
+  });
   const derivedState = deriveIssueStateHistory({
     history,
     phase: typeof payload.phase === "string" ? payload.phase : undefined,
@@ -401,9 +501,14 @@ function normalizeIssueStateRecord(input: unknown): IssueState | null {
     merged: payload.merged === true,
     updatedAt: isIsoDate(payload.updatedAt) ? payload.updatedAt : undefined,
     startedAt: isIsoDate(payload.startedAt) ? payload.startedAt : undefined,
+    planApproved: payload.planApproved === true,
+    branch: typeof payload.branch === "string" ? payload.branch : undefined,
+    codeProduced: payload.handover && typeof payload.handover === "object"
+      ? (payload.handover as Record<string, unknown>).codeProduced === true
+      : false,
   });
 
-  const issueState = isIssueState(payload.state) ? payload.state : derivedState.state;
+  const issueState = coerceIssueState(payload.state) ?? derivedState.state;
   const stateHistory = persistedStateHistory.length > 0 ? persistedStateHistory : derivedState.stateHistory;
   const stateUpdatedAt = coerceTimestamp(
     payload.stateUpdatedAt,
@@ -411,6 +516,7 @@ function normalizeIssueStateRecord(input: unknown): IssueState | null {
     payload.updatedAt,
     payload.startedAt,
   );
+  const handover = normalizeIssueHandover(payload.handover, stateUpdatedAt);
 
   return {
     version: typeof payload.version === "number" ? Math.max(payload.version, 2) : 2,
@@ -433,6 +539,7 @@ function normalizeIssueStateRecord(input: unknown): IssueState | null {
     updatedAt: coerceTimestamp(payload.updatedAt, stateUpdatedAt, payload.startedAt),
     duration: typeof payload.duration === "number" || payload.duration === null ? payload.duration : null,
     history,
+    handover,
   };
 }
 
@@ -495,7 +602,7 @@ export function computeStats(issues: IssueState[]): CodingFactoryStats {
     total: issues.length,
     completed: issues.filter((issue) => isCompletedIssueState(issue.state)).length,
     failed: issues.filter((issue) => issue.state === "failed" || issue.state === "cancelled").length,
-    blocked: issues.filter((issue) => issue.state === "blocked" || issue.state === "stuck").length,
+    blocked: issues.filter((issue) => issue.state === "blocked" || issue.state === "stale").length,
     inProgress: issues.filter((issue) => !isTerminalIssueState(issue.state) && !isCompletedIssueState(issue.state)).length,
     prsCreated: issues.filter((issue) => issue.state === "pr_created" || !!issue.prUrl).length,
   };

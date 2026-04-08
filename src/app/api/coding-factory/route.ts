@@ -31,7 +31,7 @@ export async function GET() {
       intake,
       availableIssues,
       meta: {
-        stateMachineVersion: 1,
+        stateMachineVersion: 2,
         canonicalRunState: status.state,
       },
     }));

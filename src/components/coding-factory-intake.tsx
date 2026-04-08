@@ -28,6 +28,7 @@ export type IntakeState = {
 export type AvailableIssue = IntakeIssue & {
   baseBranch: string;
   phase: string;
+  state: string;
   updatedAt: string;
 };
 
@@ -100,6 +101,31 @@ function formatUpdatedAt(iso: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatIssueState(state: string): string {
+  return state.replace(/_/g, " ");
+}
+
+function issueStateBadgeClass(state: string): string {
+  switch (state) {
+    case "research_only":
+      return "bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300";
+    case "plan_ready":
+      return "bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300";
+    case "code_in_progress":
+      return "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300";
+    case "pr_created":
+    case "completed":
+      return "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300";
+    case "blocked":
+    case "failed":
+    case "cancelled":
+    case "stale":
+      return "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300";
+    default:
+      return "bg-stone-100 text-stone-600 dark:bg-stone-700/60 dark:text-stone-300";
+  }
 }
 
 function InlineError({ message }: { message: string | null }) {
@@ -418,9 +444,12 @@ export function CodingFactoryIntake({
                           {issue.title}
                         </span>
                       </div>
-                      <p className="mt-0.5 text-xs text-stone-400 dark:text-[#7a8591]">
-                        {issue.phase} · {formatUpdatedAt(issue.updatedAt)}
-                      </p>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-stone-400 dark:text-[#7a8591]">
+                        <span className={cn("rounded-full px-1.5 py-0.5 font-medium", issueStateBadgeClass(issue.state))}>
+                          {formatIssueState(issue.state)}
+                        </span>
+                        <span>{issue.phase} · {formatUpdatedAt(issue.updatedAt)}</span>
+                      </div>
                     </div>
                     <Plus className="h-3.5 w-3.5 shrink-0 text-stone-300 transition-colors group-hover:text-stone-600 dark:text-[#4a5360] dark:group-hover:text-[#c7d0d9]" />
                   </button>

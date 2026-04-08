@@ -32,6 +32,22 @@ type IssueHistory = {
   extra?: string;
 };
 
+type IssueHandover = {
+  stage: string;
+  codeProduced: boolean;
+  branchCreated: boolean;
+  branch?: string | null;
+  summary?: string;
+  nextAction?: string;
+  updatedAt: string;
+  changedFiles?: string[];
+  validation?: Array<{
+    label: string;
+    status: "pending" | "passed" | "failed" | "skipped";
+    details?: string;
+  }>;
+};
+
 type Issue = {
   issue: number;
   issueKey: string;
@@ -41,12 +57,14 @@ type Issue = {
   baseBranch: string;
   size: string;
   phase: string;
+  state: string;
   prUrl?: string;
   merged: boolean;
   startedAt: string;
   updatedAt: string;
   duration?: number | null;
   history: IssueHistory[];
+  handover?: IssueHandover;
 };
 
 type RunState = {
@@ -106,6 +124,20 @@ const PHASE_COLORS: Record<string, string> = {
   started: "bg-stone-100 text-stone-700 dark:bg-stone-700/60 dark:text-stone-200",
 };
 
+const STATE_COLORS: Record<string, string> = {
+  created: "bg-stone-100 text-stone-700 dark:bg-stone-700/60 dark:text-stone-200",
+  queued: "bg-stone-100 text-stone-700 dark:bg-stone-700/60 dark:text-stone-200",
+  research_only: "bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300",
+  plan_ready: "bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300",
+  code_in_progress: "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
+  pr_created: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+  completed: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+  blocked: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
+  failed: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
+  cancelled: "bg-stone-100 text-stone-600 dark:bg-stone-700/60 dark:text-stone-300",
+  stale: "bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300",
+};
+
 const SIZE_COLORS: Record<string, string> = {
   S: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
   M: "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
@@ -133,6 +165,14 @@ function formatUpdatedAt(iso: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatIssueState(state: string): string {
+  return state.replace(/_/g, " ");
+}
+
+function formatHandoverStage(stage: string): string {
+  return stage.replace(/_/g, " ");
 }
 
 function phaseIndex(phase: string): number {
@@ -250,6 +290,7 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issue: Pick
   const [expanded, setExpanded] = useState(false);
   const progress = computeProgress(issue);
   const phaseColor = PHASE_COLORS[issue.phase] || PHASE_COLORS.aborted;
+  const stateColor = STATE_COLORS[issue.state] || STATE_COLORS.queued;
   const sizeColor = SIZE_COLORS[issue.size] || SIZE_COLORS[""];
 
   return (
@@ -258,6 +299,9 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issue: Pick
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-bold text-stone-900 dark:text-[#f5f7fa]">#{issue.issue}</span>
+            <span className={cn("rounded-full px-2 py-0.5 text-xs font-semibold", stateColor)}>
+              {formatIssueState(issue.state)}
+            </span>
             <span className={cn("rounded-full px-2 py-0.5 text-xs font-semibold", phaseColor)}>
               {issue.phase}
             </span>
@@ -273,7 +317,7 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issue: Pick
           <p className="mt-1 text-sm text-stone-700 dark:text-[#c7d0d9]">{issue.title}</p>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-400 dark:text-[#7a8591]">
             <span className="inline-flex items-center gap-1">
-              <GitBranch className="h-3 w-3" /> {issue.branch}
+              <GitBranch className="h-3 w-3" /> {issue.branch || "no branch yet"}
             </span>
             <span className="inline-flex items-center gap-1">
               <Clock className="h-3 w-3" /> {formatUpdatedAt(issue.updatedAt)}
@@ -322,6 +366,59 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issue: Pick
           )}
         </div>
       </div>
+
+      {issue.handover && (
+        <div className="mt-3 rounded-lg border border-stone-200/80 bg-stone-50/80 px-3 py-2.5 dark:border-[#2c343d] dark:bg-[#111418]">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className={cn("rounded-full px-2 py-0.5 font-semibold", stateColor)}>
+              {formatHandoverStage(issue.handover.stage)}
+            </span>
+            <span className={cn(
+              "rounded-full px-2 py-0.5 font-semibold",
+              issue.handover.codeProduced
+                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
+                : "bg-stone-100 text-stone-700 dark:bg-stone-700/60 dark:text-stone-200",
+            )}>
+              {issue.handover.codeProduced ? "code produced" : "research / plan only"}
+            </span>
+          </div>
+          {issue.handover.summary && (
+            <p className="mt-2 text-xs text-stone-600 dark:text-[#c7d0d9]">{issue.handover.summary}</p>
+          )}
+          {issue.handover.nextAction && (
+            <p className="mt-1 text-xs text-stone-500 dark:text-[#8d98a5]">
+              Next: {issue.handover.nextAction}
+            </p>
+          )}
+          {issue.handover.validation && issue.handover.validation.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+              {issue.handover.validation.map((check) => (
+                <span
+                  key={`${issue.issueKey}-${check.label}`}
+                  className={cn(
+                    "rounded-full px-2 py-0.5",
+                    check.status === "passed"
+                      ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
+                      : check.status === "failed"
+                        ? "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300"
+                        : check.status === "skipped"
+                          ? "bg-stone-100 text-stone-600 dark:bg-stone-700/60 dark:text-stone-300"
+                          : "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
+                  )}
+                >
+                  {check.label}: {check.status}
+                </span>
+              ))}
+            </div>
+          )}
+          {issue.handover.changedFiles && issue.handover.changedFiles.length > 0 && (
+            <p className="mt-2 text-[11px] text-stone-500 dark:text-[#8d98a5]">
+              Changed: {issue.handover.changedFiles.slice(0, 4).join(", ")}
+              {issue.handover.changedFiles.length > 4 ? ` +${issue.handover.changedFiles.length - 4} more` : ""}
+            </p>
+          )}
+        </div>
+      )}
 
       {issue.history.length > 0 && (
         <div className="mt-3">

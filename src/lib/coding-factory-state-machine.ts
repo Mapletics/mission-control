@@ -13,17 +13,15 @@ export const RUN_STATES = [
 export const ISSUE_STATES = [
   "created",
   "queued",
-  "planning",
-  "implementing",
-  "reviewing",
-  "fixing",
-  "approved",
+  "research_only",
+  "plan_ready",
+  "code_in_progress",
   "pr_created",
   "completed",
   "blocked",
   "failed",
   "cancelled",
-  "stuck",
+  "stale",
 ] as const;
 
 export type CodingFactoryRunStateName = (typeof RUN_STATES)[number];
@@ -59,25 +57,36 @@ const RUN_TRANSITIONS: Record<CodingFactoryRunStateName, readonly CodingFactoryR
 };
 
 const ISSUE_TRANSITIONS: Record<CodingFactoryIssueStateName, readonly CodingFactoryIssueStateName[]> = {
-  created: ["queued", "planning", "blocked", "failed", "cancelled", "stuck"],
-  queued: ["planning", "implementing", "blocked", "failed", "cancelled", "stuck"],
-  planning: ["implementing", "reviewing", "blocked", "failed", "cancelled", "stuck"],
-  implementing: ["reviewing", "fixing", "blocked", "failed", "cancelled", "stuck"],
-  reviewing: ["fixing", "approved", "blocked", "failed", "cancelled", "stuck"],
-  fixing: ["reviewing", "approved", "blocked", "failed", "cancelled", "stuck"],
-  approved: ["pr_created", "completed", "blocked", "failed", "cancelled", "stuck"],
-  pr_created: ["completed", "blocked", "failed", "cancelled", "stuck"],
+  created: ["queued", "research_only", "blocked", "failed", "cancelled", "stale"],
+  queued: ["research_only", "plan_ready", "code_in_progress", "blocked", "failed", "cancelled", "stale"],
+  research_only: ["plan_ready", "code_in_progress", "blocked", "failed", "cancelled", "stale"],
+  plan_ready: ["code_in_progress", "blocked", "failed", "cancelled", "stale"],
+  code_in_progress: ["pr_created", "completed", "blocked", "failed", "cancelled", "stale"],
+  pr_created: ["completed", "blocked", "failed", "cancelled", "stale"],
   completed: [],
-  blocked: ["queued", "planning", "implementing", "reviewing", "fixing", "approved", "pr_created", "completed", "failed", "cancelled", "stuck"],
-  failed: ["queued", "planning", "implementing", "reviewing", "fixing", "approved", "pr_created", "completed", "cancelled", "stuck"],
-  cancelled: ["queued", "planning", "implementing"],
-  stuck: ["queued", "planning", "implementing", "reviewing", "fixing", "failed", "cancelled"],
+  blocked: ["queued", "research_only", "plan_ready", "code_in_progress", "pr_created", "completed", "failed", "cancelled", "stale"],
+  failed: ["queued", "research_only", "plan_ready", "code_in_progress", "pr_created", "completed", "cancelled", "stale"],
+  cancelled: ["queued", "research_only", "plan_ready", "code_in_progress"],
+  stale: ["queued", "research_only", "plan_ready", "code_in_progress", "failed", "cancelled"],
 };
 
 const RUN_TERMINAL_STATES = new Set<CodingFactoryRunStateName>(["completed", "blocked", "failed", "cancelled", "stuck"]);
-const ISSUE_TERMINAL_STATES = new Set<CodingFactoryIssueStateName>(["completed", "blocked", "failed", "cancelled", "stuck"]);
+const ISSUE_TERMINAL_STATES = new Set<CodingFactoryIssueStateName>(["completed", "blocked", "failed", "cancelled", "stale"]);
 const ISSUE_COMPLETED_STATES = new Set<CodingFactoryIssueStateName>(["completed", "pr_created"]);
-const ISSUE_ACTIVE_WORK_STATES = new Set<CodingFactoryIssueStateName>(["implementing", "reviewing", "fixing", "approved"]);
+const ISSUE_ACTIVE_WORK_STATES = new Set<CodingFactoryIssueStateName>(["code_in_progress"]);
+
+const LEGACY_ISSUE_STATE_ALIASES: Record<string, CodingFactoryIssueStateName> = {
+  planning: "research_only",
+  implementing: "code_in_progress",
+  reviewing: "code_in_progress",
+  fixing: "code_in_progress",
+  approved: "code_in_progress",
+  "research-only": "research_only",
+  "plan-ready": "plan_ready",
+  "code-in-progress": "code_in_progress",
+  "pr-created": "pr_created",
+  stuck: "stale",
+};
 
 function isValidDate(value: string | undefined): value is string {
   return !!value && !Number.isNaN(new Date(value).getTime());
@@ -93,6 +102,12 @@ export function isRunState(value: unknown): value is CodingFactoryRunStateName {
 
 export function isIssueState(value: unknown): value is CodingFactoryIssueStateName {
   return typeof value === "string" && (ISSUE_STATES as readonly string[]).includes(value);
+}
+
+export function coerceIssueState(value: unknown): CodingFactoryIssueStateName | null {
+  if (isIssueState(value)) return value;
+  if (typeof value !== "string") return null;
+  return LEGACY_ISSUE_STATE_ALIASES[value.trim().toLowerCase()] ?? null;
 }
 
 export function isTerminalRunState(state: CodingFactoryRunStateName): boolean {
@@ -158,14 +173,12 @@ export function issuePhaseFromState(state: CodingFactoryIssueStateName): string 
     case "created":
     case "queued":
       return "classify";
-    case "planning":
+    case "research_only":
+      return "research";
+    case "plan_ready":
       return "plan";
-    case "implementing":
+    case "code_in_progress":
       return "implement";
-    case "reviewing":
-    case "fixing":
-    case "approved":
-      return "review";
     case "pr_created":
       return "pr-created";
     case "completed":
@@ -176,7 +189,7 @@ export function issuePhaseFromState(state: CodingFactoryIssueStateName): string 
       return "failed";
     case "cancelled":
       return "aborted";
-    case "stuck":
+    case "stale":
       return "blocked";
     default:
       return "started";
@@ -288,20 +301,22 @@ export function applyIssueTransition(
 function normalizeHistoryPhase(phase: string | undefined): string {
   const raw = (phase || "").trim().toLowerCase();
   if (!raw) return "";
-  if (raw.startsWith("analyze-fix")) return "fixing";
-  if (raw.startsWith("analyze-")) return "reviewing";
-  if (raw.startsWith("review-")) return "reviewing";
+  if (raw.startsWith("analyze-fix")) return "code_in_progress";
+  if (raw.startsWith("analyze-")) return "code_in_progress";
+  if (raw.startsWith("review-")) return "code_in_progress";
   if (raw === "classify") return "created";
-  if (raw === "research" || raw === "plan") return "planning";
-  if (raw === "implement") return "implementing";
-  if (raw === "review") return "reviewing";
-  if (raw === "gate") return "reviewing";
+  if (raw === "research") return "research_only";
+  if (raw === "plan") return "plan_ready";
+  if (raw === "implement") return "code_in_progress";
+  if (raw === "review") return "code_in_progress";
+  if (raw === "gate") return "code_in_progress";
   if (raw === "ship") return "pr_created";
   if (raw === "done") return "completed";
   if (raw === "pr-created") return "pr_created";
   if (raw === "failed") return "failed";
   if (raw === "blocked") return "blocked";
   if (raw === "aborted") return "cancelled";
+  if (raw === "stuck") return "stale";
   if (raw === "started") return "created";
   return raw;
 }
@@ -311,22 +326,29 @@ export function inferIssueStateFromLegacyTopLevel(input: {
   status?: string;
   prUrl?: string;
   merged?: boolean;
+  planApproved?: boolean;
+  branch?: string;
+  codeProduced?: boolean;
 }): CodingFactoryIssueStateName {
   if (input.merged) return "completed";
-  if (input.prUrl && input.phase === "pr-created") return "pr_created";
 
-  switch ((input.phase || "").trim().toLowerCase()) {
+  const normalizedPhase = (input.phase || "").trim().toLowerCase();
+  if (input.prUrl && (normalizedPhase === "pr-created" || normalizedPhase === "ship" || normalizedPhase === "done")) {
+    return "pr_created";
+  }
+
+  switch (normalizedPhase) {
     case "classify":
     case "started":
       return "created";
     case "research":
+      return "research_only";
     case "plan":
-      return "planning";
+      return input.planApproved ? "plan_ready" : "research_only";
     case "implement":
-      return "implementing";
     case "review":
     case "gate":
-      return input.status === "approved" ? "approved" : "reviewing";
+      return "code_in_progress";
     case "ship":
     case "pr-created":
       return "pr_created";
@@ -338,7 +360,10 @@ export function inferIssueStateFromLegacyTopLevel(input: {
       return "failed";
     case "aborted":
       return "cancelled";
+    case "stuck":
+      return "stale";
     default:
+      if (input.codeProduced || Boolean(input.branch)) return input.prUrl ? "pr_created" : "code_in_progress";
       return input.prUrl ? "pr_created" : "created";
   }
 }
@@ -347,10 +372,10 @@ export function inferIssueStateFromHistoryEvent(event: LegacyHistoryLike): Codin
   const normalizedPhase = normalizeHistoryPhase(event.phase);
   const normalizedStatus = (event.status || "").trim().toLowerCase();
 
-  if (normalizedStatus === "approved") return "approved";
-  if (normalizedStatus === "analyze_fix") return "fixing";
-  if (normalizedStatus === "analyze_pass") return "reviewing";
-  if (normalizedStatus === "passed" && normalizedPhase === "reviewing") return "reviewing";
+  if (normalizedStatus === "approved") return normalizedPhase === "pr_created" ? "pr_created" : "code_in_progress";
+  if (normalizedStatus === "analyze_fix") return "code_in_progress";
+  if (normalizedStatus === "analyze_pass") return "code_in_progress";
+  if (normalizedStatus === "passed" && normalizedPhase === "code_in_progress") return "code_in_progress";
   if (normalizedStatus === "passed" && normalizedPhase === "pr_created") return "pr_created";
   if (normalizedStatus === "failed") return "failed";
   if (normalizedStatus === "blocked") return "blocked";
@@ -358,15 +383,15 @@ export function inferIssueStateFromHistoryEvent(event: LegacyHistoryLike): Codin
   if (normalizedStatus === "done" && normalizedPhase === "created") return "queued";
 
   if (normalizedPhase === "created") return "queued";
-  if (normalizedPhase === "planning") return "planning";
-  if (normalizedPhase === "implementing") return "implementing";
-  if (normalizedPhase === "reviewing") return normalizedStatus === "approved" ? "approved" : "reviewing";
-  if (normalizedPhase === "fixing") return "fixing";
+  if (normalizedPhase === "research_only") return "research_only";
+  if (normalizedPhase === "plan_ready") return normalizedStatus === "done" ? "plan_ready" : "research_only";
+  if (normalizedPhase === "code_in_progress") return "code_in_progress";
   if (normalizedPhase === "pr_created") return "pr_created";
   if (normalizedPhase === "completed") return "completed";
   if (normalizedPhase === "failed") return "failed";
   if (normalizedPhase === "blocked") return "blocked";
   if (normalizedPhase === "cancelled") return "cancelled";
+  if (normalizedPhase === "stale") return "stale";
 
   return null;
 }
@@ -374,6 +399,7 @@ export function inferIssueStateFromHistoryEvent(event: LegacyHistoryLike): Codin
 export function normalizePersistedTransitions<S extends string>(
   input: unknown,
   guard: (value: unknown) => value is S,
+  options: { coerce?: (value: unknown) => S | null } = {},
 ): StateTransition<S>[] {
   if (!Array.isArray(input)) return [];
 
@@ -381,10 +407,12 @@ export function normalizePersistedTransitions<S extends string>(
   for (const entry of input) {
     if (!entry || typeof entry !== "object") continue;
     const item = entry as Record<string, unknown>;
-    if (!guard(item.from) || !guard(item.to)) continue;
+    const from = options.coerce?.(item.from) ?? (guard(item.from) ? item.from : null);
+    const to = options.coerce?.(item.to) ?? (guard(item.to) ? item.to : null);
+    if (!from || !to) continue;
     transitions.push({
-      from: item.from,
-      to: item.to,
+      from,
+      to,
       at: normalizeTransitionAt(typeof item.at === "string" ? item.at : undefined),
       source: typeof item.source === "string" ? item.source as TransitionSource : "persisted",
       reason: typeof item.reason === "string" ? item.reason : undefined,
@@ -402,6 +430,9 @@ export function deriveIssueStateHistory(input: {
   merged?: boolean;
   updatedAt?: string;
   startedAt?: string;
+  planApproved?: boolean;
+  branch?: string;
+  codeProduced?: boolean;
 }): {
   state: CodingFactoryIssueStateName;
   stateHistory: StateTransition<CodingFactoryIssueStateName>[];
@@ -543,14 +574,14 @@ export function resolveRunStateFromIssues(input: {
 
   if (states.some((state) => state === "failed")) return "failed";
   if (states.some((state) => state === "blocked")) return "blocked";
-  if (states.some((state) => state === "stuck")) return "stuck";
+  if (states.some((state) => state === "stale")) return "stuck";
 
   const hasActiveWork = states.some((state) => isActiveIssueState(state));
   if (hasActiveWork) {
     return "running";
   }
 
-  if (states.some((state) => state === "planning" || state === "queued" || state === "created")) return "queued";
+  if (states.some((state) => state === "research_only" || state === "plan_ready" || state === "queued" || state === "created")) return "queued";
   if (states.some((state) => state === "cancelled")) return "cancelled";
 
   return input.currentState;

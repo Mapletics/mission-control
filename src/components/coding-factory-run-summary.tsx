@@ -20,6 +20,7 @@ type RunState = {
   baseBranch: string;
   selectedIssues: Array<{ issueKey: string }>;
   status: string;
+  state?: string;
 };
 
 type CodingFactoryRunSummaryProps = {
@@ -42,8 +43,8 @@ function formatElapsed(startedAt: string): string {
   return `${hours}h ${remainMins}m`;
 }
 
-function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+function formatRunState(state: string | undefined): string {
+  return (state || "unknown").replace(/_/g, " ");
 }
 
 export function CodingFactoryRunSummary({
@@ -88,6 +89,9 @@ export function CodingFactoryRunSummary({
             )}
           >
             {statusLabel}
+          </span>
+          <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-medium text-stone-700 dark:bg-stone-700/60 dark:text-stone-200">
+            {formatRunState(summaryRun.state)}
           </span>
         </div>
 
