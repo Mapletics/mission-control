@@ -21,6 +21,7 @@ import { SectionBody, SectionHeader, SectionLayout } from "@/components/section-
 import { LoadingState } from "@/components/ui/loading-state";
 import { cn } from "@/lib/utils";
 import { useSmartPoll } from "@/hooks/use-smart-poll";
+import type { CodingFactoryPhaseConfig as PipelinePhaseConfig } from "@/lib/coding-factory/types";
 
 /* ── Types ── */
 
@@ -79,6 +80,11 @@ type RunState = {
     title: string;
   }>;
   status: string;
+  state?: string;
+  pipeline?: {
+    version: number;
+    phases: Record<string, PipelinePhaseConfig>;
+  };
 };
 
 type CodingFactoryData = {
@@ -101,6 +107,15 @@ type CodingFactoryData = {
   run: RunState;
   activeRun: RunState;
   runSource: "draft" | "persisted" | "legacy-bridge";
+  pipeline?: {
+    version: number;
+    defaults: {
+      targetRepo: string;
+      baseBranch: string;
+      timeoutMinutes: number;
+    };
+    phases: Record<string, PipelinePhaseConfig>;
+  };
 };
 
 /* ── Constants ── */
@@ -650,6 +665,7 @@ export function NightModeView({ legacy }: { legacy?: boolean }) {
               run={data.run}
               activeRun={data.activeRun}
               runSource={data.runSource}
+              pipeline={data.pipeline}
             />
 
             <CodingFactoryAgents />

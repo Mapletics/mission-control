@@ -3,6 +3,7 @@
 import type { ComponentType } from "react";
 import { AlertCircle, Ban, CheckCircle2, CircleDot, Clock, ExternalLink, GitBranch, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { CodingFactoryPhaseConfig as PipelinePhaseConfig } from "@/lib/coding-factory/types";
 
 type CodingFactoryStats = {
   total: number;
@@ -21,6 +22,10 @@ type RunState = {
   selectedIssues: Array<{ issueKey: string }>;
   status: string;
   state?: string;
+  pipeline?: {
+    version: number;
+    phases: Record<string, PipelinePhaseConfig>;
+  };
 };
 
 type CodingFactoryRunSummaryProps = {
@@ -32,6 +37,15 @@ type CodingFactoryRunSummaryProps = {
   run: RunState;
   activeRun: RunState;
   runSource: "draft" | "persisted" | "legacy-bridge";
+  pipeline?: {
+    version: number;
+    defaults: {
+      targetRepo: string;
+      baseBranch: string;
+      timeoutMinutes: number;
+    };
+    phases: Record<string, PipelinePhaseConfig>;
+  };
 };
 
 function formatElapsed(startedAt: string): string {
@@ -56,6 +70,7 @@ export function CodingFactoryRunSummary({
   run,
   activeRun,
   runSource,
+  pipeline,
 }: CodingFactoryRunSummaryProps) {
   const summaryRun = activeRun;
   const statusLabel = isRunning ? status : summaryRun.status;
@@ -118,6 +133,26 @@ export function CodingFactoryRunSummary({
         <StatBadge icon={Ban} label="Blocked" value={stats.blocked} color="text-red-600 dark:text-red-400" />
         <StatBadge icon={ExternalLink} label="PRs" value={stats.prsCreated} color="text-purple-600 dark:text-purple-400" />
       </div>
+
+      {pipeline && (
+        <div className="mt-3 border-t border-stone-100 pt-3 dark:border-[#23282e]">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">
+            Configured phase policy
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(pipeline.phases).map(([phase, cfg]) => (
+              <span
+                key={phase}
+                className="rounded-full border border-stone-200 bg-stone-50 px-2 py-1 text-[11px] text-stone-700 dark:border-[#313941] dark:bg-[#111417] dark:text-[#d7dde5]"
+              >
+                <strong className="capitalize">{phase}</strong>: {cfg.backend}
+                {cfg.agentId ? ` · ${cfg.agentId}` : ""}
+                {cfg.model ? ` · ${cfg.model}` : ""}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
