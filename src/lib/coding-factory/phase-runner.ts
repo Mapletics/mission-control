@@ -5,7 +5,7 @@ import { buildExecutionTargets } from "@/lib/coding-factory/fallback-policy";
 import { getPhaseRegistryEntry } from "@/lib/coding-factory-phase-registry";
 import { ClaudeCliRunner } from "@/lib/coding-factory/runners/claude-cli";
 import { CodexRunner } from "@/lib/coding-factory/runners/codex";
-import { createPhaseResult } from "@/lib/coding-factory/runners/base";
+import { createPhaseResult, detectObviousNonArtifactOutput } from "@/lib/coding-factory/runners/base";
 import { SubagentRunner } from "@/lib/coding-factory/runners/subagent";
 import type { CodingFactoryPhase, PhaseRunRequest, PhaseRunResult } from "@/lib/coding-factory/types";
 
@@ -35,6 +35,11 @@ async function validateSuccessfulPhaseOutputs(request: PhaseRunRequest): Promise
   ok: boolean;
   missing: string[];
   empty: string[];
+  invalid: Array<{
+    path: string;
+    outcome: "retryable_error" | "blocked";
+    reason: string;
+  }>;
 }> {
   const requiredPaths = new Set<string>([
     ...(request.outputFiles || []),
@@ -46,6 +51,11 @@ async function validateSuccessfulPhaseOutputs(request: PhaseRunRequest): Promise
 
   const missing: string[] = [];
   const empty: string[] = [];
+  const invalid: Array<{
+    path: string;
+    outcome: "retryable_error" | "blocked";
+    reason: string;
+  }> = [];
 
   for (const path of requiredPaths) {
     const status = await fileExistsAndIsNonEmpty(path);
@@ -55,13 +65,29 @@ async function validateSuccessfulPhaseOutputs(request: PhaseRunRequest): Promise
     }
     if (!status.nonEmpty) {
       empty.push(path);
+      continue;
+    }
+
+    try {
+      const content = await readFile(path, "utf-8");
+      const invalidOutput = detectObviousNonArtifactOutput(content);
+      if (invalidOutput) {
+        invalid.push({
+          path,
+          outcome: invalidOutput.outcome,
+          reason: invalidOutput.reason,
+        });
+      }
+    } catch {
+      // Non-readable output files are handled by existence/emptiness checks above.
     }
   }
 
   return {
-    ok: missing.length === 0 && empty.length === 0,
+    ok: missing.length === 0 && empty.length === 0 && invalid.length === 0,
     missing,
     empty,
+    invalid,
   };
 }
 
@@ -139,6 +165,18 @@ export async function runPhaseWithFallbacks(
     if (result.ok) {
       const outputValidation = await validateSuccessfulPhaseOutputs(effectiveRequest);
       if (!outputValidation.ok) {
+        const runnerOutputSignal = detectObviousNonArtifactOutput(result.summary || undefined);
+        const invalidSignals = [
+          ...outputValidation.invalid,
+          ...(runnerOutputSignal && outputValidation.invalid.length === 0
+            ? [{
+                path: "<runner-output>",
+                outcome: runnerOutputSignal.outcome,
+                reason: runnerOutputSignal.reason,
+              }]
+            : []),
+        ];
+        const invalidDetail = invalidSignals.map((item) => `${item.path} (${item.reason})`);
         const validationError = [
           outputValidation.missing.length > 0
             ? `missing outputs: ${outputValidation.missing.join(", ")}`
@@ -146,15 +184,26 @@ export async function runPhaseWithFallbacks(
           outputValidation.empty.length > 0
             ? `empty outputs: ${outputValidation.empty.join(", ")}`
             : null,
+          invalidDetail.length > 0
+            ? `non-artifact outputs: ${invalidDetail.join(", ")}`
+            : null,
         ].filter(Boolean).join(" | ");
+        const validationOutcome = invalidSignals.some((item) => item.outcome === "retryable_error")
+          ? "retryable_error"
+          : invalidSignals.length > 0
+            ? "blocked"
+            : "fatal_error";
 
         return createPhaseResult(effectiveRequest, {
-          outcome: "fatal_error",
+          outcome: validationOutcome,
           startedAt: result.startedAt,
           finishedAt: result.finishedAt,
           summary: result.summary,
           error: `Phase ${request.phase} reported success but failed post-run validation: ${validationError}`,
-          retryHint: "Re-run the same phase only after the required output artifact is written successfully.",
+          blockReason: validationOutcome === "blocked" ? validationError : undefined,
+          retryHint: validationOutcome === "retryable_error"
+            ? "Retry the same phase after the environment or quota issue is resolved."
+            : "Re-run the same phase only after the required output artifact is written successfully.",
           logPath: result.logPath,
           stdoutPath: result.stdoutPath,
           outputFiles: result.outputFiles,
@@ -162,7 +211,10 @@ export async function runPhaseWithFallbacks(
           command: result.command,
           metadata: {
             ...(result.metadata || {}),
-            postRunValidation: outputValidation,
+            postRunValidation: {
+              ...outputValidation,
+              invalid: invalidSignals,
+            },
             attemptedBackends: executionTargets.map((item) => item.backend),
             phaseRegistry: phaseEntry,
           },

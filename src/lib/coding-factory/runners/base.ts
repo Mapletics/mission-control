@@ -77,6 +77,43 @@ export function classifyRunnerError(error: unknown): Extract<CodingFactoryRunner
   return "fatal_error";
 }
 
+export function detectObviousNonArtifactOutput(
+  content: string | undefined,
+): { outcome: Extract<CodingFactoryRunnerResultKind, "retryable_error" | "blocked">; reason: string } | null {
+  const normalized = content?.trim();
+  if (!normalized) return null;
+
+  const lower = normalized.toLowerCase();
+  const firstWindow = lower.slice(0, 2000);
+  const shortEnough = normalized.length <= 4000;
+
+  const retryablePatterns: Array<[RegExp, string]> = [
+    [/\b(?:usage limit|quota exceeded|quota reached|rate limit|insufficient credits|purchase more credits|credit balance)\b/i, "usage or quota limit output"],
+    [/\bcould(?: not|n't) complete\b/i, "completion failure output"],
+  ];
+
+  for (const [pattern, reason] of retryablePatterns) {
+    if (pattern.test(firstWindow)) {
+      return { outcome: "retryable_error", reason };
+    }
+  }
+
+  const blockerPatterns: Array<[RegExp, string]> = [
+    [/^(?:i(?:'|’)m sorry|sorry[,.!\s]|i can(?:not|'t)|i do not have access|i don't have access|unable to|access denied|permission denied|blocked\b)/i, "refusal-style output"],
+    [/\b(?:access denied|permission denied|write scope|required permissions?|tool .* disabled)\b/i, "permission-blocked output"],
+    [/\b(?:environment(?: is)? blocked|blocked by environment)\b/i, "environment-blocked output"],
+    [/\b(?:sandbox|bubblewrap|bwrap:)\b[\s\S]{0,120}\b(?:failed|denied|blocked|unavailable|not available|not permitted)\b/i, "sandbox failure output"],
+  ];
+
+  for (const [pattern, reason] of blockerPatterns) {
+    if (pattern.test(firstWindow) && shortEnough) {
+      return { outcome: "blocked", reason };
+    }
+  }
+
+  return null;
+}
+
 export function extractRunnerErrorDetails(error: unknown): { message: string; stdout?: string; stderr?: string } {
   const fallbackMessage = error instanceof Error ? error.message : String(error);
   const payload = (error && typeof error === "object") ? error as {
@@ -122,6 +159,7 @@ export async function materializePrimaryOutputFromText(
 ): Promise<string | null> {
   const normalized = content?.trim();
   if (!normalized) return null;
+  if (detectObviousNonArtifactOutput(normalized)) return null;
 
   const primaryOutputPath = request.artifactContract?.primaryOutput?.path
     || request.outputFiles?.[0]
