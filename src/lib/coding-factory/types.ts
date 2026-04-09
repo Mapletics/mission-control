@@ -8,6 +8,13 @@ export const CODING_FACTORY_PHASES = [
   "pr",
 ] as const;
 
+export const CODING_FACTORY_CORE_SUBAGENT_PHASES = [
+  "research",
+  "plan",
+  "implement",
+  "review",
+] as const;
+
 export const CODING_FACTORY_BACKENDS = [
   "claude-cli",
   "codex",
@@ -30,6 +37,7 @@ export const CODING_FACTORY_RUNNER_RESULT_KINDS = [
 ] as const;
 
 export type CodingFactoryPhase = typeof CODING_FACTORY_PHASES[number];
+export type CodingFactoryCoreSubagentPhase = typeof CODING_FACTORY_CORE_SUBAGENT_PHASES[number];
 export type CodingFactoryBackend = typeof CODING_FACTORY_BACKENDS[number];
 export type CodingFactoryProfile = typeof CODING_FACTORY_PROFILES[number];
 export type CodingFactoryRunnerResultKind = typeof CODING_FACTORY_RUNNER_RESULT_KINDS[number];
@@ -89,6 +97,8 @@ export type CodingFactoryPhaseRegistryEntry = {
   title: string;
   order: number;
   requiredArtifacts: readonly string[];
+  defaultBackend?: CodingFactoryBackend;
+  defaultAgentId?: string;
   successPhase?: CodingFactoryPhase | null;
   failurePhase?: CodingFactoryPhase | null;
 };
