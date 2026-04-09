@@ -1,7 +1,13 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import type { PhaseRunRequest, PhaseRunResult } from "@/lib/coding-factory/types";
-import { classifyRunnerError, createPhaseResult, type CodingFactoryRunner } from "@/lib/coding-factory/runners/base";
+import {
+  classifyRunnerError,
+  createPhaseResult,
+  extractRunnerErrorDetails,
+  writeRunnerLog,
+  type CodingFactoryRunner,
+} from "@/lib/coding-factory/runners/base";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,11 +28,17 @@ export class CodexRunner implements CodingFactoryRunner {
     }
 
     try {
-      const { stdout } = await execFileAsync(command[0], command.slice(1), {
+      const { stdout, stderr } = await execFileAsync(command[0], command.slice(1), {
         cwd: request.worktreePath || request.repoPath,
         timeout: (request.timeoutMinutes || 15) * 60_000,
         maxBuffer: 2 * 1024 * 1024,
       });
+
+      await writeRunnerLog(request.logPath, [
+        ["COMMAND", command.join(" ")],
+        ["STDOUT", stdout],
+        ["STDERR", stderr],
+      ]);
 
       return createPhaseResult(request, {
         outcome: "success",
@@ -35,8 +47,14 @@ export class CodexRunner implements CodingFactoryRunner {
         command,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const { message, stdout, stderr } = extractRunnerErrorDetails(error);
       const outcome = classifyRunnerError(error);
+      await writeRunnerLog(request.logPath, [
+        ["COMMAND", command.join(" ")],
+        ["STDOUT", stdout],
+        ["STDERR", stderr],
+        ["ERROR", message],
+      ]);
       return createPhaseResult(request, {
         outcome,
         startedAt,
