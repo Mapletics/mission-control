@@ -4,15 +4,28 @@ import type { PhaseRunRequest, PhaseRunResult } from "@/lib/coding-factory/types
 import {
   classifyRunnerError,
   createPhaseResult,
+  materializePrimaryOutputFromText,
   writeRunnerLog,
   type CodingFactoryRunner,
 } from "@/lib/coding-factory/runners/base";
 
+type GatewayContentChunk = {
+  type?: string;
+  text?: string;
+  content?: string;
+  value?: string;
+  [key: string]: unknown;
+};
+
 type GatewayMessage = {
   role?: string;
   toolName?: string;
-  content?: Array<{ type?: string; text?: string; [key: string]: unknown }>;
+  content?: string | GatewayContentChunk[];
+  text?: string;
+  outputText?: string;
+  errorMessage?: string;
   timestamp?: number;
+  [key: string]: unknown;
 };
 
 type AgentAccepted = {
@@ -27,12 +40,34 @@ type ChatHistoryResult = {
 };
 
 function extractText(message: GatewayMessage): string {
-  const chunks = Array.isArray(message.content) ? message.content : [];
-  return chunks
-    .filter((chunk) => chunk?.type === "text" && typeof chunk.text === "string")
-    .map((chunk) => String(chunk.text))
-    .join("\n")
-    .trim();
+  const direct = [message.text, message.outputText]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.trim());
+
+  if (typeof message.content === "string" && message.content.trim().length > 0) {
+    direct.push(message.content.trim());
+  }
+
+  const chunkText = Array.isArray(message.content)
+    ? message.content
+      .map((chunk) => {
+        if (!chunk || typeof chunk !== "object") return "";
+        if (typeof chunk.text === "string" && chunk.text.trim().length > 0) return chunk.text.trim();
+        if (typeof chunk.content === "string" && chunk.content.trim().length > 0) return chunk.content.trim();
+        if (typeof chunk.value === "string" && chunk.value.trim().length > 0) return chunk.value.trim();
+        return "";
+      })
+      .filter(Boolean)
+    : [];
+
+  return [...direct, ...chunkText].join("\n").trim();
+}
+
+function extractAssistantSummary(message: GatewayMessage | undefined): string {
+  if (!message) return "";
+  const text = extractText(message);
+  if (text) return text;
+  return typeof message.errorMessage === "string" ? message.errorMessage.trim() : "";
 }
 
 function buildSessionKey(request: PhaseRunRequest, agentId: string): string {
@@ -120,11 +155,15 @@ export class SubagentRunner implements CodingFactoryRunner {
       );
 
       const messages = Array.isArray(history.messages) ? history.messages : [];
-      const lastAssistant = [...messages].reverse().find((entry) => entry.role === "assistant" && extractText(entry));
-      const assistantText = lastAssistant ? extractText(lastAssistant) : "";
+      const lastAssistant = [...messages].reverse().find((entry) => entry.role === "assistant");
+      const assistantText = extractAssistantSummary(lastAssistant);
       const toolResults = messages
         .filter((entry) => entry.role === "toolResult")
-        .map((entry) => ({ toolName: entry.toolName || null, text: extractText(entry) }));
+        .map((entry) => ({ toolName: entry.toolName || null, text: extractText(entry) }))
+        .filter((entry) => entry.text.length > 0);
+      const derivedArtifactText = [assistantText, ...toolResults.map((entry) => entry.text)]
+        .find((value) => value.trim().length > 0);
+      const materializedOutputPath = await materializePrimaryOutputFromText(request, derivedArtifactText);
 
       await writeRunnerLog(request.logPath, [
         ["AGENT", agentId],
@@ -134,6 +173,7 @@ export class SubagentRunner implements CodingFactoryRunner {
         ["WAIT_RESULT", JSON.stringify(wait, null, 2)],
         ["ASSISTANT", assistantText || undefined],
         ["TOOL_RESULTS", toolResults.length > 0 ? JSON.stringify(toolResults, null, 2) : undefined],
+        ["MATERIALIZED_OUTPUT", materializedOutputPath || undefined],
       ]);
 
       return createPhaseResult(request, {
@@ -145,6 +185,9 @@ export class SubagentRunner implements CodingFactoryRunner {
           runId: runId || null,
           wait,
           toolResults,
+          materializedOutputPath,
+          assistantStopReason: typeof lastAssistant?.stopReason === "string" ? lastAssistant.stopReason : null,
+          assistantErrorMessage: typeof lastAssistant?.errorMessage === "string" ? lastAssistant.errorMessage : null,
         },
       });
     } catch (error) {
