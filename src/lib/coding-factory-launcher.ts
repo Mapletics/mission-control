@@ -20,11 +20,17 @@ import {
   type IssueRef,
 } from "@/lib/coding-factory";
 import { applyRunTransition, isTerminalIssueState } from "@/lib/coding-factory-state-machine";
+import { resolvePhaseConfig } from "@/lib/coding-factory/config";
+import { createCodingFactoryOrchestrator } from "@/lib/coding-factory-orchestrator";
 
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const BRANCH_PATTERN = /^[A-Za-z0-9._\/-]+$/;
 const LEGACY_NIGHT_MODE_SCRIPT = process.env.CODING_FACTORY_NIGHT_MODE_SCRIPT || "/home/ubuntu/dev-handbook/automation/old_night-mode.sh";
+const LEGACY_WEB_SCRIPT =
+  process.env.CODING_FACTORY_WEB_SCRIPT ||
+  "/home/ubuntu/dev-handbook/automation/work-issue-web.sh";
 const DEFAULT_LOG_DIR = process.env.CODING_FACTORY_LOG_DIR || "/tmp";
+const DEFAULT_LAUNCH_MODE = "orchestrator" as const;
 
 const ALLOWED_REPOS_RAW =
   process.env.CODING_FACTORY_ALLOWED_REPOS ||
@@ -38,26 +44,12 @@ const ALLOWED_TARGET_REPOS: ReadonlySet<string> = new Set(
     .filter(Boolean),
 );
 
-type TargetRepoKind = "flutter" | "web";
+function getLegacyLauncherScriptPath(targetRepo: string): string {
+  if (targetRepo === "Mapletics/App_frontend") {
+    return LEGACY_NIGHT_MODE_SCRIPT;
+  }
 
-const WEB_WORK_ISSUE_SCRIPT =
-  process.env.CODING_FACTORY_WEB_SCRIPT ||
-  "/home/ubuntu/dev-handbook/automation/work-issue-web.sh";
-
-const REPO_KIND_BY_SLUG: Record<string, TargetRepoKind> = {
-  "Mapletics/App_frontend": "flutter",
-  "Mapletics/mapletics-dashboard": "web",
-  "Mapletics/mapletics-website": "web",
-};
-
-function getTargetRepoKind(targetRepo: string): TargetRepoKind {
-  return REPO_KIND_BY_SLUG[targetRepo] ?? "web";
-}
-
-function getLauncherScriptPath(targetRepo: string): string {
-  return getTargetRepoKind(targetRepo) === "flutter"
-    ? LEGACY_NIGHT_MODE_SCRIPT
-    : WEB_WORK_ISSUE_SCRIPT;
+  return LEGACY_WEB_SCRIPT;
 }
 
 export function getAllowedTargetRepos(): string[] {
@@ -109,24 +101,32 @@ function validateLaunchInput(input: CodingFactoryLaunchInput): string | null {
   return null;
 }
 
-async function ensureScriptExists(targetRepo: string): Promise<void> {
-  const scriptPath = getLauncherScriptPath(targetRepo);
+async function ensureLegacyScriptExists(targetRepo: string): Promise<void> {
+  const scriptPath = getLegacyLauncherScriptPath(targetRepo);
   try {
     await access(scriptPath);
   } catch {
     throw new Error(
-      `Launcher script not found for repo "${targetRepo}": ${scriptPath}. ` +
+      `Legacy launcher adapter script not found for repo "${targetRepo}": ${scriptPath}. ` +
       `Check CODING_FACTORY_NIGHT_MODE_SCRIPT or CODING_FACTORY_WEB_SCRIPT.`,
     );
   }
+}
+
+async function ensureV2OrchestratorRuntimeExists(): Promise<void> {
+  await Promise.all([
+    access(join(process.cwd(), "src/lib/coding-factory-orchestrator-worker.ts")),
+    access(join(process.cwd(), "node_modules/jiti/lib/jiti-cli.mjs")),
+    access(join(process.cwd(), "node_modules/tsconfig-paths/register.js")),
+  ]);
 }
 
 function buildRunId(): string {
   return `cf-${new Date().toISOString()}`;
 }
 
-function buildCommand(input: CodingFactoryLaunchInput): string[] {
-  const scriptPath = getLauncherScriptPath(input.targetRepo);
+function buildLegacyAdapterCommand(input: CodingFactoryLaunchInput): string[] {
+  const scriptPath = getLegacyLauncherScriptPath(input.targetRepo);
   return [
     "bash",
     scriptPath,
@@ -135,6 +135,16 @@ function buildCommand(input: CodingFactoryLaunchInput): string[] {
     input.baseBranch,
     "--repo",
     input.targetRepo,
+  ];
+}
+
+function buildOrchestratorCommand(): string[] {
+  return [
+    "node",
+    "-r",
+    join(process.cwd(), "node_modules/tsconfig-paths/register.js"),
+    join(process.cwd(), "node_modules/jiti/lib/jiti-cli.mjs"),
+    join(process.cwd(), "src/lib/coding-factory-orchestrator-worker.ts"),
   ];
 }
 
@@ -207,16 +217,41 @@ function markRunRunning(
   };
 }
 
-async function spawnDetached(command: string[], logPath: string): Promise<number> {
+function buildLauncherEnv(targetRepo: string, envelopeJson: string): NodeJS.ProcessEnv {
+  const phaseConfigs = {
+    research: resolvePhaseConfig(targetRepo, "research"),
+    plan: resolvePhaseConfig(targetRepo, "plan"),
+    implement: resolvePhaseConfig(targetRepo, "implement"),
+    review: resolvePhaseConfig(targetRepo, "review"),
+    fixAnalyze: resolvePhaseConfig(targetRepo, "fixAnalyze"),
+    fixTests: resolvePhaseConfig(targetRepo, "fixTests"),
+    pr: resolvePhaseConfig(targetRepo, "pr"),
+  } as const;
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    NO_COLOR: "1",
+    CODING_FACTORY_LAUNCH_ENVELOPE: envelopeJson,
+    CODING_FACTORY_LAUNCH_MODE: DEFAULT_LAUNCH_MODE,
+  };
+
+  for (const [phase, config] of Object.entries(phaseConfigs)) {
+    const prefix = `CF_${phase.replace(/([A-Z])/g, "_$1").toUpperCase()}`;
+    env[`${prefix}_BACKEND`] = config.backend;
+    if (config.model) env[`${prefix}_MODEL`] = config.model;
+    if (config.agentId) env[`${prefix}_AGENT`] = config.agentId;
+  }
+
+  return env;
+}
+
+async function spawnDetached(command: string[], logPath: string, env: NodeJS.ProcessEnv): Promise<number> {
   await mkdir(DEFAULT_LOG_DIR, { recursive: true });
   const fd = openSync(logPath, "a");
   const child = spawn(command[0], command.slice(1), {
     detached: true,
     stdio: ["ignore", fd, fd],
-    env: {
-      ...process.env,
-      NO_COLOR: "1",
-    },
+    env,
   });
 
   child.unref();
@@ -238,7 +273,7 @@ function createSupervisorState(
   const now = new Date().toISOString();
   const launchIssues = getLaunchIssues(input);
   return {
-    version: 1,
+    version: 2,
     runId: run.runId,
     status: "running",
     source: input.source,
@@ -250,6 +285,8 @@ function createSupervisorState(
     selectedIssues: launchIssues,
     command,
     logPath,
+    currentIssueKey: null,
+    currentPhase: null,
     startedAt: now,
     updatedAt: now,
   };
@@ -271,7 +308,11 @@ export async function launchCodingFactoryRun(input: CodingFactoryLaunchInput): P
   const validationError = validateLaunchInput(input);
   if (validationError) throw new Error(validationError);
 
-  await ensureScriptExists(input.targetRepo);
+  if (DEFAULT_LAUNCH_MODE === "orchestrator") {
+    await ensureV2OrchestratorRuntimeExists();
+  } else {
+    await ensureLegacyScriptExists(input.targetRepo);
+  }
 
   const supervisorHealth = await readSupervisorHealth();
   if (supervisorHealth.isHealthy || supervisorHealth.fallbackNightModeProcess) {
@@ -304,9 +345,23 @@ export async function launchCodingFactoryRun(input: CodingFactoryLaunchInput): P
       };
 
   const queuedRun = await saveRunState(queueRunState(runBase, now, input.source), draftInput);
-  const command = buildCommand(input);
+  const orchestrator = createCodingFactoryOrchestrator({
+    runId: queuedRun.runId,
+    targetRepo: input.targetRepo,
+    baseBranch: input.baseBranch,
+    selectedIssues: getLaunchIssues(input).map((issue) => ({
+      issue: issue.issue,
+      issueKey: issue.issueKey,
+      title: issue.title,
+    })),
+    launchMode: DEFAULT_LAUNCH_MODE,
+  });
+  const envelope = orchestrator.createLaunchEnvelope();
+  const command = DEFAULT_LAUNCH_MODE === "orchestrator"
+    ? buildOrchestratorCommand()
+    : buildLegacyAdapterCommand(input);
   const logPath = join(DEFAULT_LOG_DIR, `coding-factory-${queuedRun.runId}.log`);
-  const pid = await spawnDetached(command, logPath);
+  const pid = await spawnDetached(command, logPath, buildLauncherEnv(input.targetRepo, JSON.stringify(envelope)));
 
   if (!pid) {
     throw new Error("Failed to start Coding Factory launcher process.");
@@ -349,6 +404,38 @@ export async function launchCodingFactoryRun(input: CodingFactoryLaunchInput): P
   }
 }
 
+function resolveResumePhase(issue: { execution?: { resumeFromPhase?: string | null; phases?: Record<string, { status?: string }> } | undefined; state: string }): string | null {
+  const resumeFromPhase = issue.execution?.resumeFromPhase;
+  if (
+    resumeFromPhase === "research"
+    || resumeFromPhase === "plan"
+    || resumeFromPhase === "implement"
+    || resumeFromPhase === "review"
+    || resumeFromPhase === "fixAnalyze"
+    || resumeFromPhase === "fixTests"
+    || resumeFromPhase === "pr"
+  ) {
+    return resumeFromPhase;
+  }
+
+  const phases = issue.execution?.phases ?? {};
+  if (phases.pr?.status === "completed") return null;
+  if (phases.pr?.status === "running") return "pr";
+  if (phases.review?.status === "completed") return "pr";
+  if (phases.review?.status === "running") return "review";
+  if (phases.fixTests?.status === "completed") return "review";
+  if (phases.fixTests?.status === "running") return "fixTests";
+  if (phases.fixAnalyze?.status === "completed") return "fixTests";
+  if (phases.fixAnalyze?.status === "running") return "fixAnalyze";
+  if (phases.implement?.status === "completed") return "review";
+  if (phases.implement?.status === "running") return "implement";
+  if (phases.plan?.status === "completed") return "implement";
+  if (phases.plan?.status === "running") return "plan";
+  if (phases.research?.status === "completed") return "plan";
+  if (phases.research?.status === "running") return "research";
+  return "research";
+}
+
 export async function buildResumeLaunchInput(runId: string): Promise<CodingFactoryLaunchInput> {
   const trimmedRunId = runId.trim();
   if (!trimmedRunId) throw new Error("runId is required for resume.");
@@ -383,6 +470,7 @@ export async function buildResumeLaunchInput(runId: string): Promise<CodingFacto
 
   const resumableIssues = selectedIssueStates
     .filter((issue) => !isTerminalIssueState(issue.state) && issue.state !== "pr_created")
+    .filter((issue) => resolveResumePhase(issue) !== null)
     .map((issue) => run.selectedIssues.find((selected) => selected.issueKey === issue.issueKey)!)
     .filter(Boolean);
 
