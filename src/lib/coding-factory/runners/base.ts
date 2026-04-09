@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "fs/promises";
+import { access, mkdir, stat, writeFile } from "fs/promises";
 import { dirname } from "path";
 import type {
   CodingFactoryRunnerResultKind,
@@ -104,4 +104,33 @@ export async function writeRunnerLog(logPath: string | undefined, sections: Arra
 
   await mkdir(dirname(logPath), { recursive: true });
   await writeFile(logPath, `${content}\n`, "utf-8");
+}
+
+async function fileExistsAndIsNonEmpty(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    const details = await stat(path);
+    return details.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+export async function materializePrimaryOutputFromText(
+  request: PhaseRunRequest,
+  content: string | undefined,
+): Promise<string | null> {
+  const normalized = content?.trim();
+  if (!normalized) return null;
+
+  const primaryOutputPath = request.artifactContract?.primaryOutput?.path
+    || request.outputFiles?.[0]
+    || request.artifactRefs?.[0]?.path;
+
+  if (!primaryOutputPath) return null;
+  if (await fileExistsAndIsNonEmpty(primaryOutputPath)) return null;
+
+  await mkdir(dirname(primaryOutputPath), { recursive: true });
+  await writeFile(primaryOutputPath, `${normalized.trimEnd()}\n`, "utf-8");
+  return primaryOutputPath;
 }

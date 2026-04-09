@@ -5,6 +5,7 @@ import {
   classifyRunnerError,
   createPhaseResult,
   extractRunnerErrorDetails,
+  materializePrimaryOutputFromText,
   writeRunnerLog,
   type CodingFactoryRunner,
 } from "@/lib/coding-factory/runners/base";
@@ -31,10 +32,13 @@ export class ClaudeCliRunner implements CodingFactoryRunner {
         maxBuffer: 2 * 1024 * 1024,
       });
 
+      const materializedOutputPath = await materializePrimaryOutputFromText(request, stdout);
+
       await writeRunnerLog(request.logPath, [
         ["COMMAND", command.join(" ")],
         ["STDOUT", stdout],
         ["STDERR", stderr],
+        ["MATERIALIZED_OUTPUT", materializedOutputPath || undefined],
       ]);
 
       return createPhaseResult(request, {
@@ -42,6 +46,7 @@ export class ClaudeCliRunner implements CodingFactoryRunner {
         startedAt,
         summary: stdout.trim() || `Phase ${request.phase} completed with Claude CLI.`,
         command,
+        metadata: materializedOutputPath ? { materializedOutputPath } : undefined,
       });
     } catch (error) {
       const { message, stdout, stderr } = extractRunnerErrorDetails(error);
