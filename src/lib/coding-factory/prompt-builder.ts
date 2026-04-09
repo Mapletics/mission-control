@@ -27,7 +27,7 @@ export function buildPhasePrompt(phase: CodingFactoryPhase, context: CodingFacto
     case "implement":
       return `${issueHeader}\n\nRepo: ${context.repoPath}\nBase branch: ${context.baseBranch}\n\nImplement only the agreed scope. Use the artifacts below and write an implementation summary to ${context.artifacts.implementationSummaryFile}:\n${artifactBlock}`;
     case "review":
-      return `${issueHeader}\n\nReview the implementation against the plan and scope. Write the review summary to ${context.artifacts.reviewFile}. Use artifacts:\n${artifactBlock}`;
+      return `${issueHeader}\n\nReview the implementation against the plan and scope. Write the review summary to ${context.artifacts.reviewFile}. End the file with exactly one machine-readable line: NEXT_PHASE: pr or NEXT_PHASE: fixAnalyze. Use artifacts:\n${artifactBlock}`;
     case "fixAnalyze":
       return `${issueHeader}\n\nFix analyzer findings only. Stay in scope. Write the result summary to ${context.artifacts.fixAnalyzeFile}. Use artifacts:\n${artifactBlock}`;
     case "fixTests":

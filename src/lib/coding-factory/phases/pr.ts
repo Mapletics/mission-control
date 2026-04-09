@@ -1,4 +1,4 @@
-import { buildPhaseLogPath, getIssueArtifactSet, getPhaseArtifactContract } from "@/lib/coding-factory/artifacts";
+import { getIssueArtifactSet, getPhaseArtifactContract } from "@/lib/coding-factory/artifacts";
 import { buildPhasePrompt } from "@/lib/coding-factory/prompt-builder";
 import type { CodingFactoryPromptContext, PhaseRunRequest } from "@/lib/coding-factory/types";
 
@@ -19,6 +19,5 @@ export function buildPrRequest(context: Omit<CodingFactoryPromptContext, "artifa
     outputFiles: [artifacts.prFile],
     artifactContract: getPhaseArtifactContract(context.issueNumber, context.repoSlug, "pr"),
     artifactRefs: [artifacts.canonical.pr],
-    logPath: buildPhaseLogPath(context.issueNumber, context.repoSlug, "pr", "claude-cli"),
   };
 }

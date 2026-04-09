@@ -1,4 +1,4 @@
-import { buildPhaseLogPath, getIssueArtifactSet, getPhaseArtifactContract } from "@/lib/coding-factory/artifacts";
+import { getIssueArtifactSet, getPhaseArtifactContract } from "@/lib/coding-factory/artifacts";
 import { buildPhasePrompt } from "@/lib/coding-factory/prompt-builder";
 import type { CodingFactoryPromptContext, PhaseRunRequest } from "@/lib/coding-factory/types";
 
@@ -19,6 +19,5 @@ export function buildFixTestsRequest(context: Omit<CodingFactoryPromptContext, "
     outputFiles: [artifacts.fixTestsFile],
     artifactContract: getPhaseArtifactContract(context.issueNumber, context.repoSlug, "fixTests"),
     artifactRefs: [artifacts.canonical.fixTests],
-    logPath: buildPhaseLogPath(context.issueNumber, context.repoSlug, "fixTests", "codex"),
   };
 }

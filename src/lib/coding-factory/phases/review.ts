@@ -1,4 +1,4 @@
-import { buildPhaseLogPath, getIssueArtifactSet, getPhaseArtifactContract } from "@/lib/coding-factory/artifacts";
+import { getIssueArtifactSet, getPhaseArtifactContract } from "@/lib/coding-factory/artifacts";
 import { buildPhasePrompt } from "@/lib/coding-factory/prompt-builder";
 import type { CodingFactoryPromptContext, PhaseRunRequest } from "@/lib/coding-factory/types";
 
@@ -19,6 +19,5 @@ export function buildReviewRequest(context: Omit<CodingFactoryPromptContext, "ar
     outputFiles: [artifacts.reviewFile],
     artifactContract: getPhaseArtifactContract(context.issueNumber, context.repoSlug, "review"),
     artifactRefs: [artifacts.canonical.review],
-    logPath: buildPhaseLogPath(context.issueNumber, context.repoSlug, "review", "claude-cli"),
   };
 }

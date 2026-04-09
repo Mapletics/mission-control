@@ -27,7 +27,7 @@ const PHASE_REGISTRY: Record<CodingFactoryPhase, CodingFactoryPhaseRegistryEntry
     order: 3,
     requiredArtifacts: ["implementation-summary.md"],
     successPhase: "review",
-    failurePhase: "fixAnalyze",
+    failurePhase: null,
   },
   review: {
     phase: "review",
@@ -35,7 +35,7 @@ const PHASE_REGISTRY: Record<CodingFactoryPhase, CodingFactoryPhaseRegistryEntry
     order: 4,
     requiredArtifacts: ["review.md"],
     successPhase: "pr",
-    failurePhase: "fixAnalyze",
+    failurePhase: null,
   },
   fixAnalyze: {
     phase: "fixAnalyze",

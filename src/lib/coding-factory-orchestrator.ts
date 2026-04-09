@@ -1,4 +1,4 @@
-import { getCanonicalPhaseSequence, getFailurePhase, getNextPhase } from "@/lib/coding-factory-phase-registry";
+import { getCanonicalPhaseSequence, getNextPhase } from "@/lib/coding-factory-phase-registry";
 import type {
   CodingFactoryIssueExecutionV2,
   CodingFactoryPhase,
@@ -102,7 +102,7 @@ export function resolvePhaseTransition(phase: CodingFactoryPhase, result: Pick<P
     return null;
   }
 
-  return getFailurePhase(phase) ?? phase;
+  return null;
 }
 
 export function createCodingFactoryOrchestrator(input: CreateCodingFactoryOrchestratorInput): CodingFactoryOrchestrator {

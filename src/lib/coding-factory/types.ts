@@ -149,6 +149,10 @@ export type PhaseRunRequest = {
   repoSlug: string;
   repoPath: string;
   baseBranch: string;
+  /**
+   * Optional isolated workspace chosen by the caller.
+   * If absent, runners operate directly in repoPath.
+   */
   worktreePath?: string;
   phase: CodingFactoryPhase;
   prompt: string;
