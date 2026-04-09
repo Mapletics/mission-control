@@ -1,5 +1,5 @@
 import { copyFile, mkdir } from "fs/promises";
-import { dirname, join } from "path";
+import { dirname } from "path";
 import {
   CODING_FACTORY_SUPERVISOR_PATH,
   readIssueStates,
@@ -14,16 +14,22 @@ import {
   type IssueRef,
 } from "@/lib/coding-factory";
 import { getIssueArtifactSet } from "@/lib/coding-factory/artifacts";
+import { buildFixAnalyzeRequest } from "@/lib/coding-factory/phases/fix-analyze";
+import { buildFixTestsRequest } from "@/lib/coding-factory/phases/fix-tests";
+import { buildImplementRequest } from "@/lib/coding-factory/phases/implement";
 import { buildPlanRequest } from "@/lib/coding-factory/phases/plan";
+import { buildPrRequest } from "@/lib/coding-factory/phases/pr";
 import { buildResearchRequest } from "@/lib/coding-factory/phases/research";
+import { buildReviewRequest } from "@/lib/coding-factory/phases/review";
 import {
   createCodingFactoryOrchestrator,
   createEmptyIssueExecutionV2,
   createEmptyRunExecutionV2,
   resolveNextPhase,
+  resolvePhaseTransition,
   type CodingFactoryOrchestratorLaunchEnvelope,
 } from "@/lib/coding-factory-orchestrator";
-import { applyIssueTransition, isCompletedIssueState, isTerminalIssueState } from "@/lib/coding-factory-state-machine";
+import { applyIssueTransition, isCompletedIssueState } from "@/lib/coding-factory-state-machine";
 import type {
   CodingFactoryIssueExecutionV2,
   CodingFactoryPhase,
@@ -31,8 +37,17 @@ import type {
   CodingFactoryRunExecutionV2,
   PhaseRunResult,
 } from "@/lib/coding-factory/types";
+import { resolveCodingFactoryRepoPath } from "@/lib/paths";
 
-const SUPPORTED_PHASES: CodingFactoryPhase[] = ["research", "plan"];
+const SUPPORTED_PHASES: CodingFactoryPhase[] = ["research", "plan", "implement", "review", "fixAnalyze", "fixTests", "pr"];
+
+type QueueCounts = {
+  pending: number;
+  running: number;
+  completed: number;
+  failed: number;
+  blocked: number;
+};
 
 function parseEnvelope(): CodingFactoryOrchestratorLaunchEnvelope {
   const raw = process.env.CODING_FACTORY_LAUNCH_ENVELOPE;
@@ -42,12 +57,6 @@ function parseEnvelope(): CodingFactoryOrchestratorLaunchEnvelope {
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function resolveRepoPath(repoSlug: string): string {
-  const [, repoName] = repoSlug.split("/");
-  if (!repoName) throw new Error(`Unable to resolve repo path for ${repoSlug}.`);
-  return join("/home/ubuntu/repos", repoName);
 }
 
 function clonePhaseRecord(
@@ -97,12 +106,14 @@ function markPhaseResult(
     : result.ok
       ? "completed"
       : "failed";
-  const nextPhase = result.ok ? resolveNextPhase({ currentPhase: phase, resumeFromPhase: null }) : phase;
+  const transitionPhase = resolvePhaseTransition(phase, result);
+  const nextPhase = transitionPhase && SUPPORTED_PHASES.includes(transitionPhase) ? transitionPhase : null;
+  const shouldContinue = result.ok || !!nextPhase;
 
   return {
     ...execution,
-    currentPhase: result.ok ? null : phase,
-    resumeFromPhase: result.ok && nextPhase && SUPPORTED_PHASES.includes(nextPhase) ? nextPhase : (result.ok ? null : phase),
+    currentPhase: shouldContinue ? null : phase,
+    resumeFromPhase: shouldContinue ? nextPhase : phase,
     result: result.outcome,
     blockedReason: result.blockReason,
     phases: {
@@ -119,7 +130,7 @@ function markPhaseResult(
         artifacts: result.artifacts ?? record.artifacts,
         latestResult: result,
         lastAttemptAt: result.finishedAt,
-        completedAt: result.ok ? result.finishedAt : record.completedAt,
+        completedAt: result.finishedAt,
         blockedReason: result.blockReason,
       },
     },
@@ -128,17 +139,64 @@ function markPhaseResult(
 
 function deriveIssueSnapshot(execution: CodingFactoryIssueExecutionV2): {
   phase: string;
-  state: "queued" | "research_only" | "plan_ready" | "blocked" | "failed";
+  state: "queued" | "research_only" | "plan_ready" | "code_in_progress" | "pr_created" | "blocked" | "failed";
 } {
+  const pr = execution.phases.pr;
+  const fixTests = execution.phases.fixTests;
+  const fixAnalyze = execution.phases.fixAnalyze;
+  const review = execution.phases.review;
+  const implement = execution.phases.implement;
   const research = execution.phases.research;
   const plan = execution.phases.plan;
 
-  if (plan?.status === "completed") return { phase: "plan", state: "plan_ready" };
+  if (pr?.status === "completed") {
+    return { phase: "pr-created", state: "pr_created" };
+  }
+  if (pr?.status === "running") {
+    return { phase: "pr", state: "code_in_progress" };
+  }
+  if (pr?.status === "blocked") return { phase: "pr", state: "blocked" };
+  if (pr?.status === "failed") return { phase: "pr", state: "failed" };
+
+  if (fixTests?.status === "completed") {
+    return { phase: execution.resumeFromPhase === "review" ? "review" : "fixTests", state: "code_in_progress" };
+  }
+  if (fixTests?.status === "running") {
+    return { phase: "fixTests", state: "code_in_progress" };
+  }
+  if (fixTests?.status === "blocked") return { phase: "fixTests", state: "blocked" };
+  if (fixTests?.status === "failed") return { phase: "fixTests", state: "failed" };
+
+  if (fixAnalyze?.status === "completed") {
+    return { phase: execution.resumeFromPhase === "fixTests" ? "fixTests" : "fixAnalyze", state: "code_in_progress" };
+  }
+  if (fixAnalyze?.status === "running") {
+    return { phase: "fixAnalyze", state: "code_in_progress" };
+  }
+  if (fixAnalyze?.status === "blocked") return { phase: "fixAnalyze", state: "blocked" };
+  if (fixAnalyze?.status === "failed") return { phase: "fixAnalyze", state: "failed" };
+
+  if (review?.status === "completed") {
+    return { phase: execution.resumeFromPhase === "pr" ? "pr" : "review", state: "code_in_progress" };
+  }
+  if (review?.status === "running") {
+    return { phase: "review", state: "code_in_progress" };
+  }
+  if (review?.status === "blocked") return { phase: "review", state: "blocked" };
+  if (review?.status === "failed") return { phase: "review", state: "failed" };
+
+  if (implement?.status === "completed" || implement?.status === "running") {
+    return { phase: implement.status === "completed" && execution.resumeFromPhase === "review" ? "review" : "implement", state: "code_in_progress" };
+  }
+  if (implement?.status === "blocked") return { phase: "implement", state: "blocked" };
+  if (implement?.status === "failed") return { phase: "implement", state: "failed" };
+
+  if (plan?.status === "completed") return { phase: execution.resumeFromPhase === "implement" ? "implement" : "plan", state: "plan_ready" };
   if (plan?.status === "running") return { phase: "plan", state: "research_only" };
   if (plan?.status === "blocked") return { phase: "plan", state: "blocked" };
   if (plan?.status === "failed") return { phase: "plan", state: "failed" };
 
-  if (research?.status === "completed") return { phase: "research", state: "research_only" };
+  if (research?.status === "completed") return { phase: execution.resumeFromPhase === "plan" ? "plan" : "research", state: "research_only" };
   if (research?.status === "running") return { phase: "research", state: "queued" };
   if (research?.status === "blocked") return { phase: "research", state: "blocked" };
   if (research?.status === "failed") return { phase: "research", state: "failed" };
@@ -161,6 +219,17 @@ async function mirrorLegacyCompat(issueNumber: number, repoSlug: string, phase: 
   if (phase === "plan") {
     await copyFile(artifacts.planFile, artifacts.legacyCompat.contractFile);
   }
+}
+
+function buildNextAction(targetState: string, snapshotPhase: string): string {
+  if (targetState === "plan_ready") return "Ready for V2 implement handoff.";
+  if (targetState === "pr_created") return "PR handoff prepared. Create or update the PR from the generated artifact.";
+  if (targetState === "code_in_progress" && snapshotPhase === "implement") return "Continue V2 review execution.";
+  if (targetState === "code_in_progress" && snapshotPhase === "review") return "Review completed. Continue with PR handoff or the fix loop.";
+  if (targetState === "code_in_progress" && snapshotPhase === "fixAnalyze") return "Continue V2 test-fix execution.";
+  if (targetState === "code_in_progress" && snapshotPhase === "fixTests") return "Continue V2 review rerun.";
+  if (targetState === "code_in_progress" && snapshotPhase === "pr") return "Continue V2 PR handoff.";
+  return "Continue V2 execution.";
 }
 
 async function persistIssue(
@@ -230,19 +299,28 @@ async function persistIssue(
     duration: existing?.duration ?? null,
     history,
     handover: {
-      stage: targetState,
-      codeProduced: false,
-      branchCreated: false,
+      stage: execution.resumeFromPhase ?? snapshot.phase,
+      codeProduced: execution.phases.implement?.status === "completed"
+        || execution.phases.fixAnalyze?.status === "completed"
+        || execution.phases.fixTests?.status === "completed"
+        || execution.phases.pr?.status === "completed"
+        || targetState === "code_in_progress"
+        || targetState === "pr_created",
+      branchCreated: existing?.handover?.branchCreated ?? false,
       branch: existing?.branch ?? null,
-      summary: result?.summary ?? existing?.handover?.summary ?? "V2 research/plan state persisted.",
-      nextAction: targetState === "plan_ready"
-        ? "Ready for legacy implement/review handoff."
-        : "Continue V2 research/plan execution.",
+      summary: result?.summary ?? existing?.handover?.summary ?? "V2 execution state persisted.",
+      nextAction: buildNextAction(targetState, snapshot.phase),
       updatedAt: at,
       artifacts: {
         researchFile: artifacts.legacyCompat.researchFile,
         contractFile: artifacts.legacyCompat.contractFile,
-        logFile: result?.logPath ?? artifacts.legacyCompat.logFile,
+        logFile: result?.logPath
+          ?? execution.phases.pr?.latestResult?.logPath
+          ?? execution.phases.fixTests?.latestResult?.logPath
+          ?? execution.phases.fixAnalyze?.latestResult?.logPath
+          ?? execution.phases.review?.latestResult?.logPath
+          ?? execution.phases.implement?.latestResult?.logPath
+          ?? artifacts.legacyCompat.logFile,
       },
       comment: existing?.handover?.comment,
       changedFiles: existing?.handover?.changedFiles,
@@ -255,14 +333,79 @@ async function persistIssue(
   });
 }
 
+function deriveExecutionQueueCounts(selected: Awaited<ReturnType<typeof readIssueStates>>): QueueCounts {
+  return selected.reduce<QueueCounts>((acc, issue) => {
+    const execution = issue.execution;
+
+    if (
+      execution?.result === "blocked"
+      || execution?.phases.pr?.status === "blocked"
+      || execution?.phases.fixTests?.status === "blocked"
+      || execution?.phases.fixAnalyze?.status === "blocked"
+      || execution?.phases.review?.status === "blocked"
+      || execution?.phases.implement?.status === "blocked"
+      || issue.state === "blocked"
+      || issue.state === "stale"
+    ) {
+      acc.blocked += 1;
+      return acc;
+    }
+
+    if (
+      execution?.result === "fatal_error"
+      || execution?.result === "retryable_error"
+      || execution?.phases.pr?.status === "failed"
+      || execution?.phases.fixTests?.status === "failed"
+      || execution?.phases.fixAnalyze?.status === "failed"
+      || execution?.phases.review?.status === "failed"
+      || execution?.phases.implement?.status === "failed"
+      || issue.state === "failed"
+      || issue.state === "cancelled"
+    ) {
+      acc.failed += 1;
+      return acc;
+    }
+
+    if (execution?.currentPhase) {
+      acc.running += 1;
+      return acc;
+    }
+
+    if (execution && execution.resumeFromPhase === null) {
+      acc.completed += 1;
+      return acc;
+    }
+
+    if (isCompletedIssueState(issue.state)) {
+      acc.completed += 1;
+      return acc;
+    }
+
+    acc.pending += 1;
+    return acc;
+  }, {
+    pending: 0,
+    running: 0,
+    completed: 0,
+    failed: 0,
+    blocked: 0,
+  });
+}
+
+function deriveRunStateFromQueue(queue: QueueCounts, total: number, fallback: CodingFactoryRunState["state"]): CodingFactoryRunState["state"] {
+  if (queue.failed > 0) return "failed";
+  if (queue.blocked > 0) return "blocked";
+  if (queue.running > 0) return "running";
+  if (total > 0 && queue.completed >= total) return "completed";
+  if (total > 0) return "queued";
+  return fallback;
+}
+
 async function refreshRunExecution(run: CodingFactoryRunState): Promise<CodingFactoryRunState> {
   const allIssues = await readIssueStates();
   const selected = selectIssuesByKey(allIssues, run.selectedIssues);
   const total = run.selectedIssues.length;
-  const completed = selected.filter((issue) => isCompletedIssueState(issue.state)).length;
-  const failed = selected.filter((issue) => issue.state === "failed" || issue.state === "cancelled").length;
-  const blocked = selected.filter((issue) => issue.state === "blocked" || issue.state === "stale").length;
-  const running = selected.filter((issue) => issue.execution?.currentPhase && !isTerminalIssueState(issue.state)).length;
+  const queue = deriveExecutionQueueCounts(selected);
 
   const execution: CodingFactoryRunExecutionV2 = {
     ...(run.execution ?? createEmptyRunExecutionV2(run.profile ?? "balanced", total)),
@@ -270,11 +413,11 @@ async function refreshRunExecution(run: CodingFactoryRunState): Promise<CodingFa
     profile: run.profile ?? "balanced",
     queue: {
       total,
-      pending: Math.max(total - completed - failed - blocked - running, 0),
-      running,
-      completed,
-      failed,
-      blocked,
+      pending: queue.pending,
+      running: queue.running,
+      completed: queue.completed,
+      failed: queue.failed,
+      blocked: queue.blocked,
     },
   };
 
@@ -287,9 +430,23 @@ async function refreshRunExecution(run: CodingFactoryRunState): Promise<CodingFa
     selectedIssues: run.selectedIssues,
   };
 
+  const targetState = deriveRunStateFromQueue(queue, total, run.state);
+  const targetStatus = targetState === "running"
+    ? "running"
+    : targetState === "completed"
+      ? "completed"
+      : targetState === "failed" || targetState === "blocked"
+        ? "unknown"
+        : total > 0
+          ? "draft"
+          : run.status;
+
   return saveRunState({
     ...run,
     updatedAt: nowIso(),
+    status: targetStatus,
+    state: targetState,
+    stateUpdatedAt: nowIso(),
     execution,
   }, intake);
 }
@@ -319,14 +476,29 @@ function buildPhaseRequest(phase: CodingFactoryPhase, input: {
     baseBranch: input.baseBranch,
   };
 
-  return phase === "research"
-    ? buildResearchRequest(context)
-    : buildPlanRequest(context);
+  switch (phase) {
+    case "research":
+      return buildResearchRequest(context);
+    case "plan":
+      return buildPlanRequest(context);
+    case "implement":
+      return buildImplementRequest(context);
+    case "review":
+      return buildReviewRequest(context);
+    case "fixAnalyze":
+      return buildFixAnalyzeRequest(context);
+    case "fixTests":
+      return buildFixTestsRequest(context);
+    case "pr":
+      return buildPrRequest(context);
+    default:
+      throw new Error(`Unsupported worker phase: ${phase}`);
+  }
 }
 
 async function main() {
   const envelope = parseEnvelope();
-  const repoPath = resolveRepoPath(envelope.targetRepo);
+  const repoPath = resolveCodingFactoryRepoPath(envelope.targetRepo);
   const orchestrator = createCodingFactoryOrchestrator({
     runId: envelope.runId,
     targetRepo: envelope.targetRepo,
@@ -387,6 +559,12 @@ async function main() {
         },
       });
 
+      await updateSupervisor({
+        status: "running",
+        currentIssueKey: issueRef.issueKey,
+        currentPhase: nextPhase,
+      });
+
       const result = await orchestrator.executePhase({
         ...buildPhaseRequest(nextPhase, {
           issueNumber: issueRef.issue,
@@ -405,7 +583,7 @@ async function main() {
       }
       await persistIssue(run, issueRef, execution, result);
 
-      if (!result.ok) {
+      if (!result.ok && execution.resumeFromPhase === nextPhase) {
         run = await refreshRunExecution({
           ...run,
           status: "unknown",
@@ -416,7 +594,9 @@ async function main() {
           },
         });
         await updateSupervisor({
-          status: "failed",
+          status: result.outcome === "blocked" ? "blocked" : "failed",
+          currentIssueKey: issueRef.issueKey,
+          currentPhase: nextPhase,
           finishedAt: result.finishedAt,
           exitCode: 1,
         });
@@ -424,12 +604,17 @@ async function main() {
       }
 
       nextPhase = resolveNextPhase(execution);
+      await updateSupervisor({
+        status: "running",
+        currentIssueKey: issueRef.issueKey,
+        currentPhase: nextPhase,
+      });
     }
   }
 
   run = await refreshRunExecution({
     ...run,
-    status: "draft",
+    status: "completed",
     execution: {
       ...(run.execution ?? createEmptyRunExecutionV2(envelope.profile, envelope.selectedIssues.length)),
       currentIssueKey: null,
@@ -439,6 +624,8 @@ async function main() {
 
   await updateSupervisor({
     status: "finished",
+    currentIssueKey: null,
+    currentPhase: null,
     finishedAt: nowIso(),
     exitCode: 0,
   });
@@ -447,6 +634,8 @@ async function main() {
 main().catch(async (error) => {
   await updateSupervisor({
     status: "failed",
+    currentIssueKey: null,
+    currentPhase: null,
     finishedAt: nowIso(),
     exitCode: 1,
   });

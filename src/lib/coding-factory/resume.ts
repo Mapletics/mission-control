@@ -9,10 +9,12 @@ export function nextPhaseAfter(phase: CodingFactoryPhase): CodingFactoryPhase | 
     case "implement":
       return "review";
     case "review":
-      return "fixAnalyze";
+      return "pr";
     case "fixAnalyze":
       return "fixTests";
     case "fixTests":
+      return "review";
+    case "pr":
       return null;
     default:
       return null;

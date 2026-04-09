@@ -20,6 +20,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { join, delimiter } from "path";
+import { readFileSync } from "fs";
 import { access } from "fs/promises";
 import { homedir } from "os";
 
@@ -357,6 +358,62 @@ function parseSkillsDirList(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
+let _codingFactoryRepoRegistry: Record<string, string> | null = null;
+
+function parseRepoPathPairs(raw: string | undefined): Record<string, string> {
+  if (!raw) return {};
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.fromEntries(
+        Object.entries(parsed)
+          .filter((entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string")
+          .map(([repoSlug, path]) => [repoSlug.trim(), path.trim()])
+          .filter(([repoSlug, path]) => repoSlug && path),
+      );
+    }
+  } catch {
+    // fall through to key=value parsing
+  }
+
+  return Object.fromEntries(
+    raw
+      .split(/[\n,]/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => {
+        const [repoSlug, ...pathParts] = entry.split("=");
+        return [repoSlug?.trim() || "", pathParts.join("=").trim()];
+      })
+      .filter(([repoSlug, path]) => repoSlug && path),
+  );
+}
+
+export function getCodingFactoryReposRoot(): string {
+  return process.env.CODING_FACTORY_REPOS_ROOT || "/home/ubuntu/repos";
+}
+
+export function getCodingFactoryRepoRegistry(): Record<string, string> {
+  if (_codingFactoryRepoRegistry) return _codingFactoryRepoRegistry;
+
+  _codingFactoryRepoRegistry = parseRepoPathPairs(process.env.CODING_FACTORY_REPO_PATHS);
+  return _codingFactoryRepoRegistry;
+}
+
+export function resolveCodingFactoryRepoPath(repoSlug: string): string {
+  const registry = getCodingFactoryRepoRegistry();
+  const direct = registry[repoSlug];
+  if (direct) return direct;
+
+  const [, repoName] = repoSlug.split("/");
+  if (!repoName) {
+    throw new Error(`Unable to resolve repo path for ${repoSlug}.`);
+  }
+
+  return join(getCodingFactoryReposRoot(), repoName);
+}
+
 export async function getSharedSkillsDirs(): Promise<string[]> {
   if (_sharedSkillsDirsDone && _sharedSkillsDirs) return _sharedSkillsDirs;
 
@@ -406,7 +463,6 @@ export function getGatewayToken(): string {
 
   // 2. Read from config (sync — token is needed synchronously by callers)
   try {
-    const { readFileSync } = require("fs");
     const configPath = join(getOpenClawHome(), "openclaw.json");
     const raw = readFileSync(configPath, "utf-8");
     const config = JSON.parse(raw);

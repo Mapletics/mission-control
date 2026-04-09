@@ -1,4 +1,4 @@
-import { getCanonicalPhaseSequence, getNextPhase } from "@/lib/coding-factory-phase-registry";
+import { getCanonicalPhaseSequence, getFailurePhase, getNextPhase } from "@/lib/coding-factory-phase-registry";
 import type {
   CodingFactoryIssueExecutionV2,
   CodingFactoryPhase,
@@ -83,6 +83,26 @@ export function resolveNextPhase(execution: Pick<CodingFactoryIssueExecutionV2, 
   if (execution.resumeFromPhase) return execution.resumeFromPhase;
   if (execution.currentPhase) return getNextPhase(execution.currentPhase);
   return getCanonicalPhaseSequence()[0] ?? null;
+}
+
+export function resolvePhaseTransition(phase: CodingFactoryPhase, result: Pick<PhaseRunResult, "ok" | "outcome" | "metadata">): CodingFactoryPhase | null {
+  const requestedNextPhase = typeof result.metadata?.nextPhase === "string"
+    ? result.metadata.nextPhase as CodingFactoryPhase
+    : null;
+
+  if (requestedNextPhase) {
+    return requestedNextPhase;
+  }
+
+  if (result.ok) {
+    return getNextPhase(phase);
+  }
+
+  if (result.outcome === "blocked") {
+    return null;
+  }
+
+  return getFailurePhase(phase) ?? phase;
 }
 
 export function createCodingFactoryOrchestrator(input: CreateCodingFactoryOrchestratorInput): CodingFactoryOrchestrator {

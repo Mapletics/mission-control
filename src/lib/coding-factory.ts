@@ -167,12 +167,12 @@ export type CodingFactoryStats = {
   prsCreated: number;
 };
 
-export type CodingFactorySupervisorStatus = "absent" | "running" | "stale" | "finished" | "failed";
+export type CodingFactorySupervisorStatus = "absent" | "running" | "stale" | "finished" | "failed" | "blocked";
 
 export type CodingFactorySupervisorState = {
-  version: 1;
+  version: number;
   runId: string;
-  status: "running" | "finished" | "failed";
+  status: "running" | "finished" | "failed" | "blocked";
   source: "start" | "resume";
   pid: number | null;
   targetRepo: string;
@@ -182,6 +182,8 @@ export type CodingFactorySupervisorState = {
   selectedIssues?: IssueRef[];
   command: string[];
   logPath: string;
+  currentIssueKey?: string | null;
+  currentPhase?: CodingFactoryPhase | null;
   startedAt: string;
   finishedAt?: string;
   exitCode?: number | null;
@@ -200,6 +202,8 @@ export type CodingFactorySupervisorHealth = {
   issueKeys: string[];
   issueNumbers: number[];
   logPath: string | null;
+  currentIssueKey: string | null;
+  currentPhase: CodingFactoryPhase | null;
   startedAt: string | null;
   finishedAt: string | null;
   updatedAt: string | null;
@@ -460,11 +464,98 @@ function deriveIssueExecutionReadModel(execution?: CodingFactoryIssueExecutionV2
     };
   }
 
+  const pr = getExecutionPhaseRecord(execution, "pr");
+  const fixTests = getExecutionPhaseRecord(execution, "fixTests");
+  const fixAnalyze = getExecutionPhaseRecord(execution, "fixAnalyze");
+  const review = getExecutionPhaseRecord(execution, "review");
+  const implement = getExecutionPhaseRecord(execution, "implement");
   const plan = getExecutionPhaseRecord(execution, "plan");
+  const research = getExecutionPhaseRecord(execution, "research");
+
+  if (pr?.status === "completed") {
+    return {
+      state: "pr_created",
+      phase: "pr-created",
+      stateUpdatedAt: pr.completedAt ?? pr.lastAttemptAt,
+    };
+  }
+
+  if (pr?.status === "running") {
+    return {
+      state: "code_in_progress",
+      phase: "pr",
+      stateUpdatedAt: pr.lastAttemptAt,
+    };
+  }
+
+  if (fixTests?.status === "completed") {
+    return {
+      state: "code_in_progress",
+      phase: execution.resumeFromPhase === "review" ? "review" : "fixTests",
+      stateUpdatedAt: fixTests.completedAt ?? fixTests.lastAttemptAt,
+    };
+  }
+
+  if (fixTests?.status === "running") {
+    return {
+      state: "code_in_progress",
+      phase: "fixTests",
+      stateUpdatedAt: fixTests.lastAttemptAt,
+    };
+  }
+
+  if (fixAnalyze?.status === "completed") {
+    return {
+      state: "code_in_progress",
+      phase: execution.resumeFromPhase === "fixTests" ? "fixTests" : "fixAnalyze",
+      stateUpdatedAt: fixAnalyze.completedAt ?? fixAnalyze.lastAttemptAt,
+    };
+  }
+
+  if (fixAnalyze?.status === "running") {
+    return {
+      state: "code_in_progress",
+      phase: "fixAnalyze",
+      stateUpdatedAt: fixAnalyze.lastAttemptAt,
+    };
+  }
+
+  if (review?.status === "completed") {
+    return {
+      state: "code_in_progress",
+      phase: execution.resumeFromPhase === "pr" ? "pr" : "review",
+      stateUpdatedAt: review.completedAt ?? review.lastAttemptAt,
+    };
+  }
+
+  if (review?.status === "running") {
+    return {
+      state: "code_in_progress",
+      phase: "review",
+      stateUpdatedAt: review.lastAttemptAt,
+    };
+  }
+
+  if (implement?.status === "completed") {
+    return {
+      state: "code_in_progress",
+      phase: execution.resumeFromPhase === "review" ? "review" : "implement",
+      stateUpdatedAt: implement.completedAt ?? implement.lastAttemptAt,
+    };
+  }
+
+  if (implement?.status === "running") {
+    return {
+      state: "code_in_progress",
+      phase: "implement",
+      stateUpdatedAt: implement.lastAttemptAt,
+    };
+  }
+
   if (plan?.status === "completed") {
     return {
       state: "plan_ready",
-      phase: "plan",
+      phase: execution.resumeFromPhase === "implement" ? "implement" : "plan",
       stateUpdatedAt: plan.completedAt ?? plan.lastAttemptAt,
     };
   }
@@ -477,11 +568,10 @@ function deriveIssueExecutionReadModel(execution?: CodingFactoryIssueExecutionV2
     };
   }
 
-  const research = getExecutionPhaseRecord(execution, "research");
   if (research?.status === "completed") {
     return {
       state: "research_only",
-      phase: "research",
+      phase: execution.resumeFromPhase === "plan" ? "plan" : "research",
       stateUpdatedAt: research.completedAt ?? research.lastAttemptAt,
     };
   }
@@ -491,6 +581,38 @@ function deriveIssueExecutionReadModel(execution?: CodingFactoryIssueExecutionV2
       state: "queued",
       phase: "research",
       stateUpdatedAt: research.lastAttemptAt,
+    };
+  }
+
+  if (execution.resumeFromPhase === "pr") {
+    return {
+      state: "code_in_progress",
+      phase: "pr",
+      stateUpdatedAt: review?.completedAt ?? review?.lastAttemptAt,
+    };
+  }
+
+  if (execution.resumeFromPhase === "review") {
+    return {
+      state: "code_in_progress",
+      phase: "review",
+      stateUpdatedAt: fixTests?.completedAt ?? implement?.completedAt ?? implement?.lastAttemptAt,
+    };
+  }
+
+  if (execution.resumeFromPhase === "fixTests") {
+    return {
+      state: "code_in_progress",
+      phase: "fixTests",
+      stateUpdatedAt: fixAnalyze?.completedAt ?? fixAnalyze?.lastAttemptAt,
+    };
+  }
+
+  if (execution.resumeFromPhase === "fixAnalyze") {
+    return {
+      state: "code_in_progress",
+      phase: "fixAnalyze",
+      stateUpdatedAt: review?.completedAt ?? review?.lastAttemptAt ?? implement?.completedAt ?? implement?.lastAttemptAt,
     };
   }
 
@@ -513,6 +635,20 @@ function deriveIssueExecutionReadModel(execution?: CodingFactoryIssueExecutionV2
   return null;
 }
 
+
+function deriveRunStateFromExecution(
+  execution: CodingFactoryRunExecutionV2 | undefined,
+  totalIssues: number,
+): CodingFactoryRunStateName | null {
+  if (!execution) return null;
+
+  if (execution.queue.failed > 0) return "failed";
+  if (execution.queue.blocked > 0) return "blocked";
+  if (execution.queue.running > 0 || execution.currentPhase || execution.currentIssueKey) return "running";
+  if (totalIssues > 0 && execution.queue.completed >= totalIssues) return "completed";
+  if (totalIssues > 0 && execution.queue.pending > 0) return "queued";
+  return null;
+}
 
 export function createDraftRunState(
   intake: CodingFactoryIntakeState,
@@ -1086,6 +1222,8 @@ function finalizeRunState(
     isNightModeRunning,
     finishedAt: nightMode?.finishedAt ?? null,
   });
+  const executionState = deriveRunStateFromExecution(run.execution, run.selectedIssues.length);
+  const resolvedState = executionState ?? canonicalState;
 
   let current = {
     state: run.state,
@@ -1093,17 +1231,17 @@ function finalizeRunState(
     stateUpdatedAt: run.stateUpdatedAt,
   };
 
-  if (current.state !== canonicalState) {
+  if (current.state !== resolvedState) {
     try {
       current = applyRunTransition(current, {
-        to: canonicalState,
+        to: resolvedState,
         at: nightMode?.finishedAt ?? selectedIssueStates[0]?.updatedAt ?? run.updatedAt,
         source: "derived",
-        reason: "resolved-from-selected-issues",
+        reason: executionState ? "resolved-from-v2-execution" : "resolved-from-selected-issues",
       });
     } catch {
       current = {
-        state: canonicalState,
+        state: resolvedState,
         stateHistory: current.stateHistory,
         stateUpdatedAt: coerceTimestamp(nightMode?.finishedAt, selectedIssueStates[0]?.updatedAt, run.updatedAt),
       };
@@ -1236,7 +1374,7 @@ function isValidSupervisorState(input: unknown): input is CodingFactorySuperviso
   const payload = input as Record<string, unknown>;
   return typeof payload.runId === "string"
     && typeof payload.status === "string"
-    && ["running", "finished", "failed"].includes(payload.status)
+    && ["running", "finished", "failed", "blocked"].includes(payload.status)
     && typeof payload.targetRepo === "string"
     && typeof payload.baseBranch === "string"
     && Array.isArray(payload.issueKeys)
@@ -1254,7 +1392,9 @@ export async function readSupervisorState(): Promise<CodingFactorySupervisorStat
 
   return {
     ...state,
-    version: 1,
+    version: typeof state.version === "number" ? state.version : 1,
+    currentIssueKey: typeof state.currentIssueKey === "string" ? state.currentIssueKey : null,
+    currentPhase: normalizeFactoryPhase(state.currentPhase),
     startedAt: typeof state.startedAt === "string" ? state.startedAt : state.updatedAt,
   };
 }
@@ -1288,6 +1428,8 @@ export async function readSupervisorHealth(): Promise<CodingFactorySupervisorHea
       issueKeys: [],
       issueNumbers: [],
       logPath: null,
+      currentIssueKey: null,
+      currentPhase: null,
       startedAt: null,
       finishedAt: null,
       updatedAt: null,
@@ -1312,6 +1454,8 @@ export async function readSupervisorHealth(): Promise<CodingFactorySupervisorHea
     issueKeys: [...state.issueKeys],
     issueNumbers: [...state.issueNumbers],
     logPath: state.logPath,
+    currentIssueKey: state.currentIssueKey ?? null,
+    currentPhase: state.currentPhase ?? null,
     startedAt: state.startedAt,
     finishedAt: state.finishedAt ?? null,
     updatedAt: state.updatedAt,

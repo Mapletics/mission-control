@@ -273,7 +273,7 @@ function createSupervisorState(
   const now = new Date().toISOString();
   const launchIssues = getLaunchIssues(input);
   return {
-    version: 1,
+    version: 2,
     runId: run.runId,
     status: "running",
     source: input.source,
@@ -285,6 +285,8 @@ function createSupervisorState(
     selectedIssues: launchIssues,
     command,
     logPath,
+    currentIssueKey: null,
+    currentPhase: null,
     startedAt: now,
     updatedAt: now,
   };
@@ -404,11 +406,33 @@ export async function launchCodingFactoryRun(input: CodingFactoryLaunchInput): P
 
 function resolveResumePhase(issue: { execution?: { resumeFromPhase?: string | null; phases?: Record<string, { status?: string }> } | undefined; state: string }): string | null {
   const resumeFromPhase = issue.execution?.resumeFromPhase;
-  if (resumeFromPhase === "research" || resumeFromPhase === "plan") return resumeFromPhase;
+  if (
+    resumeFromPhase === "research"
+    || resumeFromPhase === "plan"
+    || resumeFromPhase === "implement"
+    || resumeFromPhase === "review"
+    || resumeFromPhase === "fixAnalyze"
+    || resumeFromPhase === "fixTests"
+    || resumeFromPhase === "pr"
+  ) {
+    return resumeFromPhase;
+  }
 
   const phases = issue.execution?.phases ?? {};
-  if (phases.plan?.status === "completed") return null;
+  if (phases.pr?.status === "completed") return null;
+  if (phases.pr?.status === "running") return "pr";
+  if (phases.review?.status === "completed") return "pr";
+  if (phases.review?.status === "running") return "review";
+  if (phases.fixTests?.status === "completed") return "review";
+  if (phases.fixTests?.status === "running") return "fixTests";
+  if (phases.fixAnalyze?.status === "completed") return "fixTests";
+  if (phases.fixAnalyze?.status === "running") return "fixAnalyze";
+  if (phases.implement?.status === "completed") return "review";
+  if (phases.implement?.status === "running") return "implement";
+  if (phases.plan?.status === "completed") return "implement";
+  if (phases.plan?.status === "running") return "plan";
   if (phases.research?.status === "completed") return "plan";
+  if (phases.research?.status === "running") return "research";
   return "research";
 }
 

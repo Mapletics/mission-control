@@ -47,6 +47,8 @@ export async function GET() {
         pidAlive: supervisor.pidAlive,
         runId: supervisor.runId,
         issueKeys: supervisor.issueKeys,
+        currentIssueKey: supervisor.currentIssueKey,
+        currentPhase: supervisor.currentPhase,
         logPath: supervisor.logPath,
         startedAt: supervisor.startedAt,
         updatedAt: supervisor.updatedAt,

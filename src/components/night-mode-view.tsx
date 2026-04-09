@@ -120,7 +120,7 @@ type CodingFactoryData = {
 
 /* ── Constants ── */
 
-const PHASES_ORDERED = ["classify", "research", "plan", "implement", "review", "gate", "ship", "done"];
+const PHASES_ORDERED = ["classify", "research", "plan", "implement", "review", "fixAnalyze", "fixTests", "pr", "done"];
 const SAVE_DEBOUNCE_MS = 800;
 
 const PHASE_COLORS: Record<string, string> = {
@@ -129,6 +129,9 @@ const PHASE_COLORS: Record<string, string> = {
   plan: "bg-purple-100 text-purple-700 dark:bg-purple-500/15 dark:text-purple-300",
   implement: "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
   review: "bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300",
+  fixAnalyze: "bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300",
+  fixTests: "bg-cyan-100 text-cyan-700 dark:bg-cyan-500/15 dark:text-cyan-300",
+  pr: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
   gate: "bg-cyan-100 text-cyan-700 dark:bg-cyan-500/15 dark:text-cyan-300",
   ship: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
   done: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
@@ -192,7 +195,7 @@ function formatHandoverStage(stage: string): string {
 
 function phaseIndex(phase: string): number {
   const idx = PHASES_ORDERED.indexOf(phase);
-  return idx >= 0 ? idx : phase === "pr-created" ? PHASES_ORDERED.length - 1 : -1;
+  return idx >= 0 ? idx : phase === "pr-created" ? PHASES_ORDERED.indexOf("pr") : -1;
 }
 
 function computeProgress(issue: Issue): number {
