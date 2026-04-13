@@ -234,13 +234,15 @@ export async function runPhaseWithFallbacks(
 
     errors.push(`${target.backend}: ${result.error || result.blockReason || "unknown error"}`);
 
-    if (result.outcome === "fatal_error" || result.outcome === "blocked") {
+    const isLastTarget = target === executionTargets[executionTargets.length - 1];
+    if (result.outcome === "fatal_error" || (result.outcome === "blocked" && isLastTarget)) {
       return {
         ...result,
         metadata: {
           ...(result.metadata || {}),
           attemptedBackends: executionTargets.map((item) => item.backend),
           phaseRegistry: phaseEntry,
+          ...(errors.length > 1 ? { recoveredAfterErrors: errors.slice(0, -1) } : {}),
         },
       };
     }

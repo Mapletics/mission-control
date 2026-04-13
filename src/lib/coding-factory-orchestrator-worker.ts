@@ -1,5 +1,7 @@
-import { copyFile, mkdir } from "fs/promises";
-import { dirname } from "path";
+import { execFile } from "child_process";
+import { copyFile, mkdir, access } from "fs/promises";
+import { dirname, join } from "path";
+import { promisify } from "util";
 import {
   CODING_FACTORY_SUPERVISOR_PATH,
   readIssueStates,
@@ -40,6 +42,9 @@ import type {
 import { resolveCodingFactoryRepoPath } from "@/lib/paths";
 
 const SUPPORTED_PHASES: CodingFactoryPhase[] = ["research", "plan", "implement", "review", "fixAnalyze", "fixTests", "pr"];
+const CODE_PHASES = new Set<CodingFactoryPhase>(["implement", "review", "fixAnalyze", "fixTests", "pr"]);
+
+const execFileAsync = promisify(execFile);
 
 type QueueCounts = {
   pending: number;
@@ -47,6 +52,25 @@ type QueueCounts = {
   completed: number;
   failed: number;
   blocked: number;
+};
+
+type IssuePersistencePatch = {
+  branch?: string | null;
+  branchCreated?: boolean;
+  prUrl?: string | null;
+  summary?: string;
+  nextAction?: string;
+  changedFiles?: string[];
+};
+
+type IssueWorkspace = {
+  branch: string;
+  worktreePath: string;
+};
+
+type PullRequestResult = {
+  prUrl: string;
+  changedFiles: string[];
 };
 
 function parseEnvelope(): CodingFactoryOrchestratorLaunchEnvelope {
@@ -57,6 +81,178 @@ function parseEnvelope(): CodingFactoryOrchestratorLaunchEnvelope {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function deriveIssueBranchName(issueNumber: number, issueTitle: string): string {
+  const slug = issueTitle
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    .replace(/-+$/g, "");
+
+  return slug ? `issue-${issueNumber}-${slug}` : `issue-${issueNumber}`;
+}
+
+function getIssueWorktreePath(issueNumber: number, repoSlug: string): string {
+  return join(getIssueArtifactSet(issueNumber, repoSlug).rootDir, "worktree");
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function formatExecError(error: unknown, command: string[], cwd: string): Error {
+  const payload = error as { message?: string; stdout?: string | Buffer; stderr?: string | Buffer };
+  const stdout = typeof payload?.stdout === "string"
+    ? payload.stdout.trim()
+    : Buffer.isBuffer(payload?.stdout)
+      ? payload.stdout.toString("utf-8").trim()
+      : "";
+  const stderr = typeof payload?.stderr === "string"
+    ? payload.stderr.trim()
+    : Buffer.isBuffer(payload?.stderr)
+      ? payload.stderr.toString("utf-8").trim()
+      : "";
+  const details = [payload?.message, stdout && `stdout: ${stdout}`, stderr && `stderr: ${stderr}`]
+    .filter(Boolean)
+    .join(" | ");
+  return new Error(`Command failed in ${cwd}: ${command.join(" ")} :: ${details || "unknown error"}`);
+}
+
+async function runCommand(command: string[], cwd: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(command[0], command.slice(1), {
+      cwd,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return stdout.trim();
+  } catch (error) {
+    throw formatExecError(error, command, cwd);
+  }
+}
+
+async function tryRunCommand(command: string[], cwd: string): Promise<{ ok: boolean; stdout: string }> {
+  try {
+    return {
+      ok: true,
+      stdout: await runCommand(command, cwd),
+    };
+  } catch {
+    return {
+      ok: false,
+      stdout: "",
+    };
+  }
+}
+
+async function ensureIssueWorkspace(input: {
+  issueNumber: number;
+  issueTitle: string;
+  repoSlug: string;
+  repoPath: string;
+  baseBranch: string;
+}): Promise<IssueWorkspace> {
+  const branch = deriveIssueBranchName(input.issueNumber, input.issueTitle);
+  const worktreePath = getIssueWorktreePath(input.issueNumber, input.repoSlug);
+  const worktreeGitPath = join(worktreePath, ".git");
+
+  await mkdir(dirname(worktreePath), { recursive: true });
+  await runCommand(["git", "fetch", "origin", input.baseBranch], input.repoPath);
+
+  if (!await pathExists(worktreeGitPath)) {
+    const localBranchExists = (await tryRunCommand(["git", "show-ref", "--verify", `refs/heads/${branch}`], input.repoPath)).ok;
+    if (localBranchExists) {
+      await runCommand(["git", "worktree", "add", worktreePath, branch], input.repoPath);
+    } else {
+      const remoteBranchExists = (await tryRunCommand(["git", "ls-remote", "--exit-code", "--heads", "origin", branch], input.repoPath)).ok;
+      if (remoteBranchExists) {
+        await runCommand(["git", "fetch", "origin", `${branch}:${branch}`], input.repoPath);
+        await runCommand(["git", "worktree", "add", worktreePath, branch], input.repoPath);
+      } else {
+        await runCommand(["git", "worktree", "add", "-b", branch, worktreePath, `origin/${input.baseBranch}`], input.repoPath);
+      }
+    }
+  }
+
+  const currentBranch = await runCommand(["git", "rev-parse", "--abbrev-ref", "HEAD"], worktreePath);
+  if (currentBranch !== branch) {
+    await runCommand(["git", "switch", branch], worktreePath);
+  }
+
+  await runCommand(["git", "push", "--set-upstream", "origin", branch], worktreePath);
+
+  return {
+    branch,
+    worktreePath,
+  };
+}
+
+async function ensurePullRequest(input: {
+  issueNumber: number;
+  issueTitle: string;
+  repoSlug: string;
+  baseBranch: string;
+  branch: string;
+  worktreePath: string;
+  prFile: string;
+}): Promise<PullRequestResult> {
+  await runCommand(["git", "fetch", "origin", input.baseBranch], input.worktreePath);
+
+  const status = await runCommand(["git", "status", "--porcelain"], input.worktreePath);
+  if (status.trim()) {
+    await runCommand(["git", "add", "-A"], input.worktreePath);
+    await runCommand(["git", "commit", "-m", `fix(issue-${input.issueNumber}): ${input.issueTitle}`], input.worktreePath);
+  }
+
+  await runCommand(["git", "push", "--set-upstream", "origin", input.branch], input.worktreePath);
+
+  const aheadBehind = await runCommand(["git", "rev-list", "--left-right", "--count", `origin/${input.baseBranch}...HEAD`], input.worktreePath);
+  const [, aheadRaw = "0"] = aheadBehind.split(/\s+/);
+  const ahead = Number.parseInt(aheadRaw, 10);
+  if (!Number.isFinite(ahead) || ahead <= 0) {
+    throw new Error(`Issue branch ${input.branch} is not ahead of origin/${input.baseBranch}; refusing PR creation.`);
+  }
+
+  const changedFilesOutput = await runCommand(["git", "diff", "--name-only", `origin/${input.baseBranch}...HEAD`], input.worktreePath);
+  const changedFiles = changedFilesOutput
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const existingPr = await tryRunCommand(["gh", "pr", "view", input.branch, "--repo", input.repoSlug, "--json", "url", "--jq", ".url"], input.worktreePath);
+  if (existingPr.ok && existingPr.stdout.trim()) {
+    return {
+      prUrl: existingPr.stdout.trim(),
+      changedFiles,
+    };
+  }
+
+  const prUrl = await runCommand([
+    "gh",
+    "pr",
+    "create",
+    "--repo",
+    input.repoSlug,
+    "--base",
+    input.baseBranch,
+    "--head",
+    input.branch,
+    "--title",
+    `fix: #${input.issueNumber} ${input.issueTitle}`,
+    "--body-file",
+    input.prFile,
+  ], input.worktreePath);
+
+  return {
+    prUrl: prUrl.trim(),
+    changedFiles,
+  };
 }
 
 function clonePhaseRecord(
@@ -237,6 +433,7 @@ async function persistIssue(
   issueRef: IssueRef,
   execution: CodingFactoryIssueExecutionV2,
   result?: PhaseRunResult,
+  patch?: IssuePersistencePatch,
 ): Promise<void> {
   const issues = await readIssueStates();
   const existing = issues.find((item) => item.issueKey === issueRef.issueKey);
@@ -285,14 +482,14 @@ async function persistIssue(
     repo: issueRef.repo,
     issueKey: issueRef.issueKey,
     title: existing?.title ?? issueRef.title,
-    branch: existing?.branch ?? "",
+    branch: patch?.branch ?? existing?.branch ?? "",
     baseBranch: run.baseBranch,
     size: existing?.size ?? issueRef.repo.split("/")[1] ?? "",
     phase: snapshot.phase,
     state: transition.state,
     stateUpdatedAt: transition.stateUpdatedAt,
     stateHistory: transition.stateHistory,
-    prUrl: existing?.prUrl,
+    prUrl: patch?.prUrl ?? existing?.prUrl,
     merged: existing?.merged ?? false,
     startedAt: existing?.startedAt ?? at,
     updatedAt: at,
@@ -306,10 +503,10 @@ async function persistIssue(
         || execution.phases.pr?.status === "completed"
         || targetState === "code_in_progress"
         || targetState === "pr_created",
-      branchCreated: existing?.handover?.branchCreated ?? false,
-      branch: existing?.branch ?? null,
-      summary: result?.summary ?? existing?.handover?.summary ?? "V2 execution state persisted.",
-      nextAction: buildNextAction(targetState, snapshot.phase),
+      branchCreated: patch?.branchCreated ?? existing?.handover?.branchCreated ?? false,
+      branch: patch?.branch ?? existing?.branch ?? null,
+      summary: patch?.summary ?? result?.summary ?? existing?.handover?.summary ?? "V2 execution state persisted.",
+      nextAction: patch?.nextAction ?? buildNextAction(targetState, snapshot.phase),
       updatedAt: at,
       artifacts: {
         researchFile: artifacts.legacyCompat.researchFile,
@@ -323,7 +520,7 @@ async function persistIssue(
           ?? artifacts.legacyCompat.logFile,
       },
       comment: existing?.handover?.comment,
-      changedFiles: existing?.handover?.changedFiles,
+      changedFiles: patch?.changedFiles ?? existing?.handover?.changedFiles,
       validation: existing?.handover?.validation,
     },
     profile: run.profile,
@@ -467,6 +664,7 @@ function buildPhaseRequest(phase: CodingFactoryPhase, input: {
   repoSlug: string;
   repoPath: string;
   baseBranch: string;
+  worktreePath?: string;
 }) {
   const context = {
     issueNumber: input.issueNumber,
@@ -474,6 +672,7 @@ function buildPhaseRequest(phase: CodingFactoryPhase, input: {
     repoSlug: input.repoSlug,
     repoPath: input.repoPath,
     baseBranch: input.baseBranch,
+    worktreePath: input.worktreePath,
   };
 
   switch (phase) {
@@ -544,10 +743,37 @@ async function main() {
     const existing = allIssues.find((item) => item.issueKey === issueRef.issueKey);
     let execution = existing?.execution ?? createEmptyIssueExecutionV2(issueRef.issueKey, envelope.profile);
     let nextPhase = resolveNextPhase(execution);
+    let workspace: IssueWorkspace | null = existing?.branch
+      ? {
+          branch: existing.branch,
+          worktreePath: getIssueWorktreePath(issueRef.issue, envelope.targetRepo),
+        }
+      : null;
 
     while (nextPhase && SUPPORTED_PHASES.includes(nextPhase)) {
+      if (CODE_PHASES.has(nextPhase)) {
+        workspace = await ensureIssueWorkspace({
+          issueNumber: issueRef.issue,
+          issueTitle: issueRef.title,
+          repoSlug: envelope.targetRepo,
+          repoPath,
+          baseBranch: envelope.baseBranch,
+        });
+        await persistIssue(run, issueRef, execution, undefined, {
+          branch: workspace.branch,
+          branchCreated: true,
+          summary: `Prepared issue branch ${workspace.branch} on top of ${envelope.baseBranch} at ${workspace.worktreePath}.`,
+          nextAction: nextPhase === "implement"
+            ? "Issue branch prepared. Implementation can start on the isolated worktree."
+            : undefined,
+        });
+      }
+
       execution = markPhaseRunning(execution, nextPhase);
-      await persistIssue(run, issueRef, execution);
+      await persistIssue(run, issueRef, execution, undefined, {
+        branch: workspace?.branch,
+        branchCreated: !!workspace,
+      });
 
       run = await refreshRunExecution({
         ...run,
@@ -572,16 +798,53 @@ async function main() {
           repoSlug: envelope.targetRepo,
           repoPath,
           baseBranch: envelope.baseBranch,
+          worktreePath: workspace?.worktreePath,
         }),
         runId: envelope.runId,
         profile: envelope.profile,
       });
 
+      let patch: IssuePersistencePatch | undefined = workspace
+        ? {
+            branch: workspace.branch,
+            branchCreated: true,
+          }
+        : undefined;
+
+      if (result.ok && nextPhase === "pr" && workspace) {
+        const prResult = await ensurePullRequest({
+          issueNumber: issueRef.issue,
+          issueTitle: issueRef.title,
+          repoSlug: envelope.targetRepo,
+          baseBranch: envelope.baseBranch,
+          branch: workspace.branch,
+          worktreePath: workspace.worktreePath,
+          prFile: getIssueArtifactSet(issueRef.issue, envelope.targetRepo).prFile,
+        });
+        result.summary = `${result.summary ?? "PR artifact prepared."}
+
+GitHub PR: ${prResult.prUrl}`;
+        result.metadata = {
+          ...(result.metadata || {}),
+          branch: workspace.branch,
+          prUrl: prResult.prUrl,
+          changedFiles: prResult.changedFiles,
+        };
+        patch = {
+          branch: workspace.branch,
+          branchCreated: true,
+          prUrl: prResult.prUrl,
+          summary: result.summary,
+          nextAction: `PR created on GitHub: ${prResult.prUrl}`,
+          changedFiles: prResult.changedFiles,
+        };
+      }
+
       execution = markPhaseResult(execution, nextPhase, result);
       if (result.ok) {
         await mirrorLegacyCompat(issueRef.issue, envelope.targetRepo, nextPhase);
       }
-      await persistIssue(run, issueRef, execution, result);
+      await persistIssue(run, issueRef, execution, result, patch);
 
       if (!result.ok && execution.resumeFromPhase === nextPhase) {
         run = await refreshRunExecution({
