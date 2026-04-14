@@ -21,7 +21,7 @@ import {
 } from "@/lib/coding-factory";
 import { applyRunTransition, isTerminalIssueState } from "@/lib/coding-factory-state-machine";
 import { resolvePhaseConfig } from "@/lib/coding-factory/config";
-import { createCodingFactoryOrchestrator } from "@/lib/coding-factory-orchestrator";
+import { createCodingFactoryOrchestrator, deriveIntegrationBranchName } from "@/lib/coding-factory-orchestrator";
 
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const BRANCH_PATTERN = /^[A-Za-z0-9._\/-]+$/;
@@ -330,18 +330,22 @@ export async function launchCodingFactoryRun(input: CodingFactoryLaunchInput): P
   };
 
   const currentRun = await readRunState(draftInput);
+  const resolvedRunId = input.runId || (input.source === "resume" ? currentRun.runId : buildRunId());
+  const resolvedIntegrationBranch = currentRun.integrationBranch || deriveIntegrationBranchName(resolvedRunId);
   const runBase = input.source === "resume"
     ? {
         ...currentRun,
         mode: input.mode,
         targetRepo: input.targetRepo,
         baseBranch: input.baseBranch,
+        integrationBranch: resolvedIntegrationBranch,
         selectedIssues: input.selectedIssues,
-        runId: input.runId || currentRun.runId,
+        runId: resolvedRunId,
       }
     : {
         ...createDraftRunState(draftInput, "draft"),
-        runId: input.runId || buildRunId(),
+        runId: resolvedRunId,
+        integrationBranch: resolvedIntegrationBranch,
       };
 
   const queuedRun = await saveRunState(queueRunState(runBase, now, input.source), draftInput);
@@ -349,6 +353,7 @@ export async function launchCodingFactoryRun(input: CodingFactoryLaunchInput): P
     runId: queuedRun.runId,
     targetRepo: input.targetRepo,
     baseBranch: input.baseBranch,
+    integrationBranch: queuedRun.integrationBranch || resolvedIntegrationBranch,
     selectedIssues: getLaunchIssues(input).map((issue) => ({
       issue: issue.issue,
       issueKey: issue.issueKey,

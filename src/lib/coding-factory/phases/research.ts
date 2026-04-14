@@ -13,6 +13,7 @@ export function buildResearchRequest(context: Omit<CodingFactoryPromptContext, "
     repoSlug: context.repoSlug,
     repoPath: context.repoPath,
     baseBranch: context.baseBranch,
+    integrationBranch: context.integrationBranch,
     phase: "research",
     prompt: buildPhasePrompt("research", { ...context, artifacts }),
     outputFiles: [artifacts.researchFile],

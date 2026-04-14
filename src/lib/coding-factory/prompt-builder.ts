@@ -23,23 +23,24 @@ export function buildPhasePrompt(phase: CodingFactoryPhase, context: CodingFacto
 
   const workspaceLine = `Repo path: ${context.repoPath}`;
   const branchLine = `Base branch: ${context.baseBranch}`;
+  const integrationLine = context.integrationBranch ? `Integration branch: ${context.integrationBranch}` : null;
   const artifactBlock = buildArtifactBlock(context);
 
   switch (phase) {
     case "research":
-      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}\n\nDo research only. Write findings to ${context.artifacts.researchFile}. Do not change product code. Return only after the artifact exists and is non-empty.\n\nArtifacts:\n${artifactBlock}`;
+      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}${integrationLine ? `\n${integrationLine}` : ""}\n\nDo research only. Write findings to ${context.artifacts.researchFile}. Do not change product code. Keep the branch model in mind: ${context.baseBranch} is the long-lived base branch, and issue work must land via ${context.integrationBranch || context.baseBranch}. Return only after the artifact exists and is non-empty.\n\nArtifacts:\n${artifactBlock}`;
     case "plan":
-      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}\n\nRead the research file and produce an implementation plan. Write it to ${context.artifacts.planFile}. Keep legacy compatibility in mind with ${context.artifacts.legacyCompat.contractFile}. Do not change product code. Return only after the artifact exists and is non-empty.\n\nArtifacts:\n${artifactBlock}`;
+      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}${integrationLine ? `\n${integrationLine}` : ""}\n\nRead the research file and produce an implementation plan. Write it to ${context.artifacts.planFile}. Keep legacy compatibility in mind with ${context.artifacts.legacyCompat.contractFile}. Do not change product code. The plan must assume ${context.baseBranch} is the base branch and issue implementation happens from ${context.integrationBranch || context.baseBranch}. Return only after the artifact exists and is non-empty.\n\nArtifacts:\n${artifactBlock}`;
     case "implement":
-      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}\n\nImplement only the agreed scope. If app work is needed, use ${context.baseBranch} as the base branch. Write an implementation summary to ${context.artifacts.implementationSummaryFile}. Return only after the summary artifact exists and is non-empty.\n\nArtifacts:\n${artifactBlock}`;
+      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}${integrationLine ? `\n${integrationLine}` : ""}\n\nImplement only the agreed scope. ${context.baseBranch} is the long-lived base branch; do not work directly on it. If app work is needed, use the issue branch that is derived from ${context.integrationBranch || context.baseBranch}. Write an implementation summary to ${context.artifacts.implementationSummaryFile}. Return only after the summary artifact exists and is non-empty.\n\nArtifacts:\n${artifactBlock}`;
     case "review":
-      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}\n\nReview the implementation against the plan and scope. Write the review summary to ${context.artifacts.reviewFile}. End the file with exactly one machine-readable line: NEXT_PHASE: pr or NEXT_PHASE: fixAnalyze. Return only after the review artifact exists and is non-empty.\n\nArtifacts:\n${artifactBlock}`;
+      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}${integrationLine ? `\n${integrationLine}` : ""}\n\nReview the implementation against the plan and scope. Remember the merge target for the issue PR is ${context.integrationBranch || context.baseBranch}, not the long-lived base branch ${context.baseBranch}. Write the review summary to ${context.artifacts.reviewFile}. End the file with exactly one machine-readable line: NEXT_PHASE: pr or NEXT_PHASE: fixAnalyze. Return only after the review artifact exists and is non-empty.\n\nArtifacts:\n${artifactBlock}`;
     case "fixAnalyze":
-      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}\n\nFix analyzer findings only. Stay in scope. Write the result summary to ${context.artifacts.fixAnalyzeFile}. Use artifacts:\n${artifactBlock}`;
+      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}${integrationLine ? `\n${integrationLine}` : ""}\n\nFix analyzer findings only. Stay in scope. Keep work on the issue branch derived from ${context.integrationBranch || context.baseBranch}, not directly on ${context.baseBranch}. Write the result summary to ${context.artifacts.fixAnalyzeFile}. Use artifacts:\n${artifactBlock}`;
     case "fixTests":
-      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}\n\nFix failing tests only. Stay in scope. Write the result summary to ${context.artifacts.fixTestsFile}. Use artifacts:\n${artifactBlock}`;
+      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}${integrationLine ? `\n${integrationLine}` : ""}\n\nFix failing tests only. Stay in scope. Keep work on the issue branch derived from ${context.integrationBranch || context.baseBranch}, not directly on ${context.baseBranch}. Write the result summary to ${context.artifacts.fixTestsFile}. Use artifacts:\n${artifactBlock}`;
     case "pr":
-      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}\n\nPrepare the PR handover only. Summarize branch, scope, validation, and PR metadata in ${context.artifacts.prFile}. Use artifacts:\n${artifactBlock}`;
+      return `${issueHeader}\n\n${workspaceLine}\n${branchLine}${integrationLine ? `\n${integrationLine}` : ""}\n\nPrepare the PR handover only. Summarize branch, scope, validation, and PR metadata in ${context.artifacts.prFile}. The issue PR must target ${context.integrationBranch || context.baseBranch}; the long-lived base branch ${context.baseBranch} is only for the final integration PR. Use artifacts:\n${artifactBlock}`;
     default:
       return issueHeader;
   }

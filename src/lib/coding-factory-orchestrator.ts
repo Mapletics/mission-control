@@ -17,6 +17,7 @@ export type CodingFactoryOrchestratorLaunchEnvelope = {
   runId: string;
   targetRepo: string;
   baseBranch: string;
+  integrationBranch: string;
   issueKeys: string[];
   selectedIssues: Array<{ issue: number; issueKey: string; title: string }>;
   profile: CodingFactoryProfile;
@@ -45,10 +46,16 @@ export type CreateCodingFactoryOrchestratorInput = {
   runId: string;
   targetRepo: string;
   baseBranch: string;
+  integrationBranch?: string;
   selectedIssues: Array<{ issue: number; issueKey: string; title: string }>;
   profile?: CodingFactoryProfile;
   launchMode?: CodingFactoryOrchestratorLaunchMode;
 };
+
+export function deriveIntegrationBranchName(runId: string): string {
+  const match = runId.match(/(\d{4}-\d{2}-\d{2})/);
+  return `night-mode/${match?.[1] || new Date().toISOString().slice(0, 10)}`;
+}
 
 export function createEmptyRunExecutionV2(profile: CodingFactoryProfile, issueCount: number): CodingFactoryRunExecutionV2 {
   return {
@@ -108,6 +115,7 @@ export function resolvePhaseTransition(phase: CodingFactoryPhase, result: Pick<P
 export function createCodingFactoryOrchestrator(input: CreateCodingFactoryOrchestratorInput): CodingFactoryOrchestrator {
   const profile = input.profile ?? "balanced";
   const launchMode = input.launchMode ?? "legacy-adapter";
+  const integrationBranch = input.integrationBranch ?? deriveIntegrationBranchName(input.runId);
 
   return {
     createLaunchEnvelope() {
@@ -117,6 +125,7 @@ export function createCodingFactoryOrchestrator(input: CreateCodingFactoryOrches
         runId: input.runId,
         targetRepo: input.targetRepo,
         baseBranch: input.baseBranch,
+        integrationBranch,
         issueKeys: input.selectedIssues.map((issue) => issue.issueKey),
         selectedIssues: input.selectedIssues,
         profile,

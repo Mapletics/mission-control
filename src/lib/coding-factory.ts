@@ -145,11 +145,15 @@ export type CodingFactoryRunState = {
   mode: CodingFactoryMode;
   targetRepo: string;
   baseBranch: string;
+  integrationBranch?: string | null;
   selectedIssues: IssueRef[];
   status: CodingFactoryRunStatus;
   state: CodingFactoryRunStateName;
   stateUpdatedAt: string;
   stateHistory: StateTransition<CodingFactoryRunStateName>[];
+  finalPrUrl?: string | null;
+  finalPrNumber?: number | null;
+  finalPrState?: string | null;
   profile?: CodingFactoryProfile;
   execution?: CodingFactoryRunExecutionV2;
   pipeline?: {
@@ -216,6 +220,9 @@ export type CodingFactoryStatus = {
   status: string;
   state: CodingFactoryRunStateName;
   integrationBranch: string | null;
+  finalPrUrl: string | null;
+  finalPrNumber: number | null;
+  finalPrState: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   issues: IssueState[];
@@ -677,11 +684,15 @@ export function createDraftRunState(
     mode: intake.mode,
     targetRepo: intake.targetRepo,
     baseBranch: intake.baseBranch,
+    integrationBranch: null,
     selectedIssues: intake.selectedIssues,
     status,
     state: current.state,
     stateUpdatedAt: current.stateUpdatedAt,
     stateHistory: current.stateHistory,
+    finalPrUrl: null,
+    finalPrNumber: null,
+    finalPrState: null,
     profile,
     execution: normalizeRunExecution(undefined, intake.selectedIssues.length, profile),
   };
@@ -1054,11 +1065,15 @@ export function normalizeRunState(input: unknown, intakeFallback?: CodingFactory
     mode,
     targetRepo,
     baseBranch,
+    integrationBranch: typeof payload.integrationBranch === "string" ? payload.integrationBranch : null,
     selectedIssues: mode === "single" ? selectedIssues.slice(0, 1) : selectedIssues,
     status,
     state,
     stateUpdatedAt,
     stateHistory,
+    finalPrUrl: typeof payload.finalPrUrl === "string" ? payload.finalPrUrl : null,
+    finalPrNumber: typeof payload.finalPrNumber === "number" ? payload.finalPrNumber : null,
+    finalPrState: typeof payload.finalPrState === "string" ? payload.finalPrState : null,
     profile,
     execution: normalizeRunExecution(payload.execution, selectedIssues.length, profile),
   };
@@ -1199,11 +1214,15 @@ function buildLegacyBridgeRunState(
     mode: inferredMode,
     targetRepo,
     baseBranch: selectedIssueStates[0]?.baseBranch || existingRun.baseBranch || intake.baseBranch,
+    integrationBranch: existingRun.integrationBranch ?? nightMode?.integrationBranch ?? null,
     selectedIssues,
     status: legacyRunStatusFromState(current.state, { hasSelectedIssues: selectedIssues.length > 0 }),
     state: current.state,
     stateUpdatedAt: current.stateUpdatedAt,
     stateHistory: current.stateHistory,
+    finalPrUrl: existingRun.finalPrUrl ?? null,
+    finalPrNumber: existingRun.finalPrNumber ?? null,
+    finalPrState: existingRun.finalPrState ?? null,
     profile: existingRun.profile ?? "balanced",
     execution: existingRun.execution ?? normalizeRunExecution(undefined, selectedIssues.length, existingRun.profile ?? "balanced"),
   };
@@ -1489,7 +1508,10 @@ export async function getCodingFactoryStatus(): Promise<CodingFactoryStatus> {
     isRunning,
     status: isRunning ? "running" : (activeRun.status ?? "unknown"),
     state: activeRun.state,
-    integrationBranch: nightMode?.integrationBranch ?? null,
+    integrationBranch: activeRun.integrationBranch ?? run.integrationBranch ?? nightMode?.integrationBranch ?? null,
+    finalPrUrl: activeRun.finalPrUrl ?? run.finalPrUrl ?? null,
+    finalPrNumber: activeRun.finalPrNumber ?? run.finalPrNumber ?? null,
+    finalPrState: activeRun.finalPrState ?? run.finalPrState ?? null,
     startedAt: nightMode?.startedAt ?? supervisor.startedAt ?? null,
     finishedAt: nightMode?.finishedAt ?? supervisor.finishedAt ?? null,
     issues,

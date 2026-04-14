@@ -13,6 +13,7 @@ export function buildReviewRequest(context: Omit<CodingFactoryPromptContext, "ar
     repoSlug: context.repoSlug,
     repoPath: context.repoPath,
     baseBranch: context.baseBranch,
+    integrationBranch: context.integrationBranch,
     worktreePath: context.worktreePath,
     phase: "review",
     prompt: buildPhasePrompt("review", { ...context, artifacts }),

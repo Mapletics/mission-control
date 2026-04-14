@@ -73,6 +73,7 @@ type RunState = {
   mode: "single" | "batch";
   targetRepo: string;
   baseBranch: string;
+  integrationBranch?: string | null;
   selectedIssues: Array<{
     issue: number;
     issueKey: string;
@@ -81,6 +82,9 @@ type RunState = {
   }>;
   status: string;
   state?: string;
+  finalPrUrl?: string | null;
+  finalPrNumber?: number | null;
+  finalPrState?: string | null;
   pipeline?: {
     version: number;
     phases: Record<string, PipelinePhaseConfig>;
@@ -91,6 +95,9 @@ type CodingFactoryData = {
   isRunning: boolean;
   status: string;
   integrationBranch: string | null;
+  finalPrUrl: string | null;
+  finalPrNumber: number | null;
+  finalPrState: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   issues: Issue[];

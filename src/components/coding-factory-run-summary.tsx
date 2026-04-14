@@ -19,9 +19,12 @@ type RunState = {
   mode: "single" | "batch";
   targetRepo: string;
   baseBranch: string;
+  integrationBranch?: string | null;
   selectedIssues: Array<{ issueKey: string }>;
   status: string;
   state?: string;
+  finalPrUrl?: string | null;
+  finalPrState?: string | null;
   pipeline?: {
     version: number;
     phases: Record<string, PipelinePhaseConfig>;
@@ -115,6 +118,11 @@ export function CodingFactoryRunSummary({
           <span className="flex items-center gap-1">
             <GitBranch className="h-3 w-3" /> {summaryRun.baseBranch}
           </span>
+          {integrationBranch && (
+            <span className="flex items-center gap-1">
+              <GitBranch className="h-3 w-3" /> {integrationBranch}
+            </span>
+          )}
           <span>{summaryRun.selectedIssues.length} issues</span>
           {startedAt && (
             <span className="flex items-center gap-1">
@@ -134,23 +142,40 @@ export function CodingFactoryRunSummary({
         <StatBadge icon={ExternalLink} label="PRs" value={stats.prsCreated} color="text-purple-600 dark:text-purple-400" />
       </div>
 
-      {pipeline && (
+      {(summaryRun.finalPrUrl || pipeline) && (
         <div className="mt-3 border-t border-stone-100 pt-3 dark:border-[#23282e]">
-          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">
-            Configured phase policy
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {Object.entries(pipeline.phases).map(([phase, cfg]) => (
-              <span
-                key={phase}
-                className="rounded-full border border-stone-200 bg-stone-50 px-2 py-1 text-[11px] text-stone-700 dark:border-[#313941] dark:bg-[#111417] dark:text-[#d7dde5]"
-              >
-                <strong className="capitalize">{phase}</strong>: {cfg.backend}
-                {cfg.agentId ? ` · ${cfg.agentId}` : ""}
-                {cfg.model ? ` · ${cfg.model}` : ""}
-              </span>
-            ))}
-          </div>
+          {summaryRun.finalPrUrl && (
+            <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px] text-stone-600 dark:text-[#cbd3dc]">
+              <span className="font-semibold uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">Final PR</span>
+              <a href={summaryRun.finalPrUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-300">
+                <ExternalLink className="h-3 w-3" /> {summaryRun.finalPrUrl}
+              </a>
+              {summaryRun.finalPrState && (
+                <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-medium text-stone-700 dark:bg-stone-700/60 dark:text-stone-200">
+                  {summaryRun.finalPrState.toLowerCase()}
+                </span>
+              )}
+            </div>
+          )}
+          {pipeline && (
+            <>
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">
+                Configured phase policy
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(pipeline.phases).map(([phase, cfg]) => (
+                  <span
+                    key={phase}
+                    className="rounded-full border border-stone-200 bg-stone-50 px-2 py-1 text-[11px] text-stone-700 dark:border-[#313941] dark:bg-[#111417] dark:text-[#d7dde5]"
+                  >
+                    <strong className="capitalize">{phase}</strong>: {cfg.backend}
+                    {cfg.agentId ? ` · ${cfg.agentId}` : ""}
+                    {cfg.model ? ` · ${cfg.model}` : ""}
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
     </section>

@@ -1,4 +1,6 @@
-import { access, readFile, stat } from "fs/promises";
+import { execFile } from "child_process";
+import { access, readFile, stat, writeFile } from "fs/promises";
+import { promisify } from "util";
 import { buildPhaseLogPath, validateArtifactContract } from "@/lib/coding-factory/artifacts";
 import { resolvePhaseConfig } from "@/lib/coding-factory/config";
 import { buildExecutionTargets } from "@/lib/coding-factory/fallback-policy";
@@ -8,6 +10,8 @@ import { CodexRunner } from "@/lib/coding-factory/runners/codex";
 import { createPhaseResult, detectObviousNonArtifactOutput } from "@/lib/coding-factory/runners/base";
 import { SubagentRunner } from "@/lib/coding-factory/runners/subagent";
 import type { CodingFactoryPhase, PhaseRunRequest, PhaseRunResult } from "@/lib/coding-factory/types";
+
+const execFileAsync = promisify(execFile);
 
 const RUNNERS = {
   "claude-cli": new ClaudeCliRunner(),
@@ -91,6 +95,104 @@ async function validateSuccessfulPhaseOutputs(request: PhaseRunRequest): Promise
   };
 }
 
+async function tryReadText(path: string | undefined): Promise<string> {
+  if (!path) return "";
+  try {
+    return await readFile(path, "utf-8");
+  } catch {
+    return "";
+  }
+}
+
+async function tryRunGit(cwd: string, args: string[]): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", args, { cwd, timeout: 15_000, maxBuffer: 512 * 1024 });
+    return stdout.trim();
+  } catch {
+    return "";
+  }
+}
+
+function clip(text: string, max = 1200): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max).trimEnd()}\n…`;
+}
+
+function getArtifactPath(request: PhaseRunRequest, key: string): string | undefined {
+  return request.artifactRefs?.find((ref) => ref.key === key)?.path;
+}
+
+async function materializeLocalPrArtifact(request: PhaseRunRequest): Promise<string | null> {
+  if (request.phase !== "pr") return null;
+  const primaryOutput = request.artifactContract?.primaryOutput?.path
+    || request.artifactRefs?.find((ref) => ref.required !== false)?.path
+    || request.outputFiles?.[0];
+  if (!primaryOutput) return null;
+
+  const workspace = request.worktreePath || request.repoPath;
+  const branch = await tryRunGit(workspace, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const committedChanged = await tryRunGit(workspace, [
+    "diff",
+    "--name-only",
+    `origin/${request.integrationBranch || request.baseBranch}...HEAD`,
+  ]);
+  const workingTreeChanged = await tryRunGit(workspace, ["diff", "--name-only"]);
+  const stagedChanged = await tryRunGit(workspace, ["diff", "--name-only", "--cached"]);
+  const changedFiles = Array.from(new Set([
+    ...committedChanged.split("\n"),
+    ...workingTreeChanged.split("\n"),
+    ...stagedChanged.split("\n"),
+  ].map((line) => line.trim()).filter(Boolean)));
+
+  const implementationSummary = await tryReadText(getArtifactPath(request, "implementation-summary.md"));
+  const reviewSummary = await tryReadText(getArtifactPath(request, "review.md"));
+  const fixAnalyzeSummary = await tryReadText(getArtifactPath(request, "fix-analyze.md"));
+  const fixTestsSummary = await tryReadText(getArtifactPath(request, "fix-tests.md"));
+
+  const validationLines = changedFiles.length > 0
+    ? changedFiles.map((file) => `- ${file}`)
+    : ["- No changed-file list available."];
+
+  const lines = [
+    `# Coding Factory PR Handover`,
+    "",
+    `Resolves #${request.issueNumber}`,
+    "",
+    `## Branches`,
+    `- Base branch: ${request.baseBranch}`,
+    request.integrationBranch ? `- Integration branch: ${request.integrationBranch}` : null,
+    branch ? `- Issue branch: ${branch}` : null,
+    "",
+    `## Scope`,
+    request.issueTitle ? `- Issue: ${request.issueTitle}` : `- Issue #${request.issueNumber}`,
+    request.integrationBranch
+      ? `- This issue PR targets \`${request.integrationBranch}\`; the final integration PR targets \`${request.baseBranch}\`.`
+      : `- This issue PR targets \`${request.baseBranch}\`.`,
+    changedFiles.length > 0 ? `- Changed files: ${changedFiles.join(", ")}` : "- Changed files: see commit diff",
+    "",
+    `## Implementation summary`,
+    clip(implementationSummary) || "No implementation summary artifact was available.",
+    "",
+    `## Review summary`,
+    clip(reviewSummary) || "No review summary artifact was available.",
+    fixAnalyzeSummary.trim() ? `\n## Fix analyze summary\n${clip(fixAnalyzeSummary)}` : null,
+    fixTestsSummary.trim() ? `\n## Fix tests summary\n${clip(fixTestsSummary)}` : null,
+    "",
+    `## Validation`,
+    reviewSummary.trim()
+      ? "- Review artifact exists and approved the change or routed to this PR handoff."
+      : "- Review artifact unavailable; validate manually.",
+    ...validationLines,
+    "",
+    `## Notes`,
+    "- PR body generated locally by Coding Factory fallback to avoid external handover-tool outages.",
+  ].filter((line): line is string => Boolean(line));
+
+  await writeFile(primaryOutput, `${lines.join("\n")}\n`, "utf-8");
+  return primaryOutput;
+}
+
 async function resolveSuccessMetadata(request: PhaseRunRequest): Promise<Record<string, unknown> | undefined> {
   if (request.phase !== "review") return undefined;
 
@@ -124,6 +226,29 @@ export async function runPhaseWithFallbacks(
   request: Omit<PhaseRunRequest, "backend">,
 ): Promise<PhaseRunResult> {
   const phaseEntry = getPhaseRegistryEntry(request.phase);
+  if (request.phase === "pr") {
+    const materializedOutputPath = await materializeLocalPrArtifact({
+      ...request,
+      backend: "codex",
+      logPath: buildPhaseLogPath(request.issueNumber, request.repoSlug, request.phase, "codex"),
+    });
+    if (materializedOutputPath) {
+      return createPhaseResult({
+        ...request,
+        backend: "codex",
+        logPath: buildPhaseLogPath(request.issueNumber, request.repoSlug, request.phase, "codex"),
+      }, {
+        outcome: "success",
+        startedAt: new Date().toISOString(),
+        summary: `PR handover generated locally at ${materializedOutputPath}.`,
+        metadata: {
+          materializedOutputPath,
+          localPrFallback: true,
+          phaseRegistry: phaseEntry,
+        },
+      });
+    }
+  }
   const phaseConfig = resolvePhaseConfig(request.repoSlug, request.phase);
   const executionTargets = buildExecutionTargets(phaseConfig);
   const errors: string[] = [];

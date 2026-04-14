@@ -66,11 +66,20 @@ type IssuePersistencePatch = {
 type IssueWorkspace = {
   branch: string;
   worktreePath: string;
+  remoteBranchExists: boolean;
 };
 
 type PullRequestResult = {
   prUrl: string;
+  prNumber: number | null;
   changedFiles: string[];
+  merged: boolean;
+};
+
+type FinalPullRequestResult = {
+  prUrl: string | null;
+  prNumber: number | null;
+  state: string | null;
 };
 
 function parseEnvelope(): CodingFactoryOrchestratorLaunchEnvelope {
@@ -151,19 +160,58 @@ async function tryRunCommand(command: string[], cwd: string): Promise<{ ok: bool
   }
 }
 
+function parsePrNumber(prUrl: string | null | undefined): number | null {
+  if (!prUrl) return null;
+  const match = prUrl.match(/\/pull\/(\d+)(?:$|[?#])/);
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
+async function ensureIntegrationBranch(input: {
+  repoPath: string;
+  baseBranch: string;
+  integrationBranch: string;
+}): Promise<void> {
+  await runCommand(["git", "fetch", "origin", input.baseBranch], input.repoPath);
+
+  const remoteExists = (await tryRunCommand([
+    "git",
+    "ls-remote",
+    "--exit-code",
+    "--heads",
+    "origin",
+    input.integrationBranch,
+  ], input.repoPath)).ok;
+
+  if (remoteExists) {
+    await runCommand(["git", "fetch", "origin", `${input.integrationBranch}:${input.integrationBranch}`], input.repoPath);
+    await runCommand(["git", "branch", "-f", input.integrationBranch, `origin/${input.integrationBranch}`], input.repoPath);
+    return;
+  }
+
+  const localExists = (await tryRunCommand(["git", "show-ref", "--verify", `refs/heads/${input.integrationBranch}`], input.repoPath)).ok;
+  if (localExists) {
+    await runCommand(["git", "branch", "-f", input.integrationBranch, `origin/${input.baseBranch}`], input.repoPath);
+  } else {
+    await runCommand(["git", "branch", input.integrationBranch, `origin/${input.baseBranch}`], input.repoPath);
+  }
+
+  await runCommand(["git", "push", "--set-upstream", "origin", `${input.integrationBranch}:${input.integrationBranch}`], input.repoPath);
+}
+
 async function ensureIssueWorkspace(input: {
   issueNumber: number;
   issueTitle: string;
   repoSlug: string;
   repoPath: string;
   baseBranch: string;
+  integrationBranch: string;
 }): Promise<IssueWorkspace> {
   const branch = deriveIssueBranchName(input.issueNumber, input.issueTitle);
   const worktreePath = getIssueWorktreePath(input.issueNumber, input.repoSlug);
   const worktreeGitPath = join(worktreePath, ".git");
 
   await mkdir(dirname(worktreePath), { recursive: true });
-  await runCommand(["git", "fetch", "origin", input.baseBranch], input.repoPath);
+  await runCommand(["git", "fetch", "origin", input.integrationBranch], input.repoPath);
 
   if (!await pathExists(worktreeGitPath)) {
     const localBranchExists = (await tryRunCommand(["git", "show-ref", "--verify", `refs/heads/${branch}`], input.repoPath)).ok;
@@ -175,7 +223,7 @@ async function ensureIssueWorkspace(input: {
         await runCommand(["git", "fetch", "origin", `${branch}:${branch}`], input.repoPath);
         await runCommand(["git", "worktree", "add", worktreePath, branch], input.repoPath);
       } else {
-        await runCommand(["git", "worktree", "add", "-b", branch, worktreePath, `origin/${input.baseBranch}`], input.repoPath);
+        await runCommand(["git", "worktree", "add", "-b", branch, worktreePath, `origin/${input.integrationBranch}`], input.repoPath);
       }
     }
   }
@@ -186,10 +234,12 @@ async function ensureIssueWorkspace(input: {
   }
 
   await runCommand(["git", "push", "--set-upstream", "origin", branch], worktreePath);
+  const remoteBranchExists = (await tryRunCommand(["git", "ls-remote", "--exit-code", "--heads", "origin", branch], worktreePath)).ok;
 
   return {
     branch,
     worktreePath,
+    remoteBranchExists,
   };
 }
 
@@ -198,11 +248,12 @@ async function ensurePullRequest(input: {
   issueTitle: string;
   repoSlug: string;
   baseBranch: string;
+  integrationBranch: string;
   branch: string;
   worktreePath: string;
   prFile: string;
 }): Promise<PullRequestResult> {
-  await runCommand(["git", "fetch", "origin", input.baseBranch], input.worktreePath);
+  await runCommand(["git", "fetch", "origin", input.integrationBranch], input.worktreePath);
 
   const status = await runCommand(["git", "status", "--porcelain"], input.worktreePath);
   if (status.trim()) {
@@ -212,46 +263,98 @@ async function ensurePullRequest(input: {
 
   await runCommand(["git", "push", "--set-upstream", "origin", input.branch], input.worktreePath);
 
-  const aheadBehind = await runCommand(["git", "rev-list", "--left-right", "--count", `origin/${input.baseBranch}...HEAD`], input.worktreePath);
+  const aheadBehind = await runCommand(["git", "rev-list", "--left-right", "--count", `origin/${input.integrationBranch}...HEAD`], input.worktreePath);
   const [, aheadRaw = "0"] = aheadBehind.split(/\s+/);
   const ahead = Number.parseInt(aheadRaw, 10);
   if (!Number.isFinite(ahead) || ahead <= 0) {
-    throw new Error(`Issue branch ${input.branch} is not ahead of origin/${input.baseBranch}; refusing PR creation.`);
+    throw new Error(`Issue branch ${input.branch} is not ahead of origin/${input.integrationBranch}; refusing PR creation.`);
   }
 
-  const changedFilesOutput = await runCommand(["git", "diff", "--name-only", `origin/${input.baseBranch}...HEAD`], input.worktreePath);
+  const changedFilesOutput = await runCommand(["git", "diff", "--name-only", `origin/${input.integrationBranch}...HEAD`], input.worktreePath);
   const changedFiles = changedFilesOutput
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
 
-  const existingPr = await tryRunCommand(["gh", "pr", "view", input.branch, "--repo", input.repoSlug, "--json", "url", "--jq", ".url"], input.worktreePath);
-  if (existingPr.ok && existingPr.stdout.trim()) {
-    return {
-      prUrl: existingPr.stdout.trim(),
-      changedFiles,
-    };
-  }
-
-  const prUrl = await runCommand([
+  const existingPr = await tryRunCommand([
     "gh",
     "pr",
-    "create",
+    "view",
+    input.branch,
     "--repo",
     input.repoSlug,
-    "--base",
-    input.baseBranch,
-    "--head",
-    input.branch,
-    "--title",
-    `fix: #${input.issueNumber} ${input.issueTitle}`,
-    "--body-file",
-    input.prFile,
+    "--json",
+    "url,number,state,baseRefName,mergedAt",
   ], input.worktreePath);
 
+  let prUrl = "";
+  let prNumber: number | null = null;
+  let merged = false;
+
+  if (existingPr.ok && existingPr.stdout.trim()) {
+    const payload = JSON.parse(existingPr.stdout) as {
+      url?: string;
+      number?: number;
+      state?: string;
+      baseRefName?: string;
+      mergedAt?: string | null;
+    };
+    if (payload.baseRefName === input.integrationBranch && payload.url) {
+      prUrl = payload.url;
+      prNumber = typeof payload.number === "number" ? payload.number : parsePrNumber(payload.url);
+      merged = Boolean(payload.mergedAt) || payload.state === "MERGED";
+    }
+  }
+
+  if (!prUrl) {
+    prUrl = (await runCommand([
+      "gh",
+      "pr",
+      "create",
+      "--repo",
+      input.repoSlug,
+      "--base",
+      input.integrationBranch,
+      "--head",
+      input.branch,
+      "--title",
+      `fix: #${input.issueNumber} ${input.issueTitle}`,
+      "--body-file",
+      input.prFile,
+    ], input.worktreePath)).trim();
+    prNumber = parsePrNumber(prUrl);
+  }
+
+  if (!merged) {
+    await runCommand([
+      "gh",
+      "pr",
+      "merge",
+      "--repo",
+      input.repoSlug,
+      "--squash",
+      "--delete-branch=false",
+      prUrl,
+    ], input.worktreePath);
+  }
+
+  const mergedStateRaw = await runCommand([
+    "gh",
+    "pr",
+    "view",
+    prUrl,
+    "--repo",
+    input.repoSlug,
+    "--json",
+    "url,number,state,mergedAt",
+  ], input.worktreePath);
+  const mergedState = JSON.parse(mergedStateRaw) as { url?: string; number?: number; state?: string; mergedAt?: string | null };
+
   return {
-    prUrl: prUrl.trim(),
+    prUrl: mergedState.url || prUrl,
+    prNumber: typeof mergedState.number === "number" ? mergedState.number : (prNumber ?? parsePrNumber(prUrl)),
     changedFiles,
+    merged: Boolean(mergedState.mergedAt) || mergedState.state === "MERGED",
   };
 }
 
@@ -490,7 +593,7 @@ async function persistIssue(
     stateUpdatedAt: transition.stateUpdatedAt,
     stateHistory: transition.stateHistory,
     prUrl: patch?.prUrl ?? existing?.prUrl,
-    merged: existing?.merged ?? false,
+    merged: result?.metadata?.merged === true || existing?.merged === true,
     startedAt: existing?.startedAt ?? at,
     updatedAt: at,
     duration: existing?.duration ?? null,
@@ -658,12 +761,90 @@ async function updateSupervisor(patch: Record<string, unknown>): Promise<void> {
   });
 }
 
+async function ensureFinalPullRequest(input: {
+  repoSlug: string;
+  repoPath: string;
+  baseBranch: string;
+  integrationBranch: string;
+}): Promise<FinalPullRequestResult> {
+  await runCommand(["git", "fetch", "origin", input.baseBranch], input.repoPath);
+  await runCommand(["git", "fetch", "origin", input.integrationBranch], input.repoPath);
+
+  const aheadBehind = await runCommand([
+    "git",
+    "rev-list",
+    "--left-right",
+    "--count",
+    `origin/${input.baseBranch}...origin/${input.integrationBranch}`,
+  ], input.repoPath);
+  const [, aheadRaw = "0"] = aheadBehind.split(/\s+/);
+  const ahead = Number.parseInt(aheadRaw, 10);
+  if (!Number.isFinite(ahead) || ahead <= 0) {
+    return {
+      prUrl: null,
+      prNumber: null,
+      state: "not_needed",
+    };
+  }
+
+  const existingPr = await tryRunCommand([
+    "gh",
+    "pr",
+    "list",
+    "--repo",
+    input.repoSlug,
+    "--head",
+    input.integrationBranch,
+    "--base",
+    input.baseBranch,
+    "--state",
+    "all",
+    "--json",
+    "url,number,state",
+  ], input.repoPath);
+
+  if (existingPr.ok && existingPr.stdout.trim()) {
+    const items = JSON.parse(existingPr.stdout) as Array<{ url?: string; number?: number; state?: string }>;
+    const pr = items[0];
+    if (pr?.url) {
+      return {
+        prUrl: pr.url,
+        prNumber: typeof pr.number === "number" ? pr.number : parsePrNumber(pr.url),
+        state: pr.state ?? "OPEN",
+      };
+    }
+  }
+
+  const prUrl = (await runCommand([
+    "gh",
+    "pr",
+    "create",
+    "--repo",
+    input.repoSlug,
+    "--base",
+    input.baseBranch,
+    "--head",
+    input.integrationBranch,
+    "--title",
+    `chore: merge ${input.integrationBranch} into ${input.baseBranch}`,
+    "--body",
+    `Automated Coding Factory final integration PR.\n\nBase branch: ${input.baseBranch}\nIntegration branch: ${input.integrationBranch}`,
+  ], input.repoPath)).trim();
+
+  return {
+    prUrl,
+    prNumber: parsePrNumber(prUrl),
+    state: "OPEN",
+  };
+}
+
 function buildPhaseRequest(phase: CodingFactoryPhase, input: {
   issueNumber: number;
   issueTitle: string;
   repoSlug: string;
   repoPath: string;
   baseBranch: string;
+  integrationBranch: string;
   worktreePath?: string;
 }) {
   const context = {
@@ -672,6 +853,7 @@ function buildPhaseRequest(phase: CodingFactoryPhase, input: {
     repoSlug: input.repoSlug,
     repoPath: input.repoPath,
     baseBranch: input.baseBranch,
+    integrationBranch: input.integrationBranch,
     worktreePath: input.worktreePath,
   };
 
@@ -702,6 +884,7 @@ async function main() {
     runId: envelope.runId,
     targetRepo: envelope.targetRepo,
     baseBranch: envelope.baseBranch,
+    integrationBranch: envelope.integrationBranch,
     selectedIssues: envelope.selectedIssues,
     profile: envelope.profile,
     launchMode: "orchestrator",
@@ -725,9 +908,25 @@ async function main() {
   run = await refreshRunExecution({
     ...run,
     runId: envelope.runId,
+    integrationBranch: envelope.integrationBranch,
+    finalPrUrl: run.finalPrUrl ?? null,
+    finalPrNumber: run.finalPrNumber ?? null,
+    finalPrState: run.finalPrState ?? null,
     profile: envelope.profile,
     execution: run.execution ?? createEmptyRunExecutionV2(envelope.profile, envelope.selectedIssues.length),
   });
+
+  await ensureIntegrationBranch({
+    repoPath,
+    baseBranch: envelope.baseBranch,
+    integrationBranch: envelope.integrationBranch,
+  });
+
+  run = await saveRunState({
+    ...run,
+    integrationBranch: envelope.integrationBranch,
+    updatedAt: nowIso(),
+  }, intake);
 
   for (const issue of envelope.selectedIssues) {
     const issueRef: IssueRef = {
@@ -747,6 +946,7 @@ async function main() {
       ? {
           branch: existing.branch,
           worktreePath: getIssueWorktreePath(issueRef.issue, envelope.targetRepo),
+          remoteBranchExists: Boolean(existing.handover?.branchCreated),
         }
       : null;
 
@@ -758,13 +958,14 @@ async function main() {
           repoSlug: envelope.targetRepo,
           repoPath,
           baseBranch: envelope.baseBranch,
+          integrationBranch: envelope.integrationBranch,
         });
         await persistIssue(run, issueRef, execution, undefined, {
           branch: workspace.branch,
-          branchCreated: true,
-          summary: `Prepared issue branch ${workspace.branch} on top of ${envelope.baseBranch} at ${workspace.worktreePath}.`,
+          branchCreated: workspace.remoteBranchExists,
+          summary: `Prepared issue branch ${workspace.branch} on top of ${envelope.integrationBranch} at ${workspace.worktreePath}.`,
           nextAction: nextPhase === "implement"
-            ? "Issue branch prepared. Implementation can start on the isolated worktree."
+            ? "Issue branch prepared from the integration branch. Implementation can start on the isolated worktree."
             : undefined,
         });
       }
@@ -772,7 +973,7 @@ async function main() {
       execution = markPhaseRunning(execution, nextPhase);
       await persistIssue(run, issueRef, execution, undefined, {
         branch: workspace?.branch,
-        branchCreated: !!workspace,
+        branchCreated: workspace?.remoteBranchExists ?? false,
       });
 
       run = await refreshRunExecution({
@@ -791,13 +992,14 @@ async function main() {
         currentPhase: nextPhase,
       });
 
-      const result = await orchestrator.executePhase({
+      let result = await orchestrator.executePhase({
         ...buildPhaseRequest(nextPhase, {
           issueNumber: issueRef.issue,
           issueTitle: issueRef.title,
           repoSlug: envelope.targetRepo,
           repoPath,
           baseBranch: envelope.baseBranch,
+          integrationBranch: envelope.integrationBranch,
           worktreePath: workspace?.worktreePath,
         }),
         runId: envelope.runId,
@@ -807,37 +1009,77 @@ async function main() {
       let patch: IssuePersistencePatch | undefined = workspace
         ? {
             branch: workspace.branch,
-            branchCreated: true,
+            branchCreated: workspace.remoteBranchExists,
           }
         : undefined;
 
       if (result.ok && nextPhase === "pr" && workspace) {
-        const prResult = await ensurePullRequest({
-          issueNumber: issueRef.issue,
-          issueTitle: issueRef.title,
-          repoSlug: envelope.targetRepo,
-          baseBranch: envelope.baseBranch,
-          branch: workspace.branch,
-          worktreePath: workspace.worktreePath,
-          prFile: getIssueArtifactSet(issueRef.issue, envelope.targetRepo).prFile,
-        });
-        result.summary = `${result.summary ?? "PR artifact prepared."}
+        try {
+          const prResult = await ensurePullRequest({
+            issueNumber: issueRef.issue,
+            issueTitle: issueRef.title,
+            repoSlug: envelope.targetRepo,
+            baseBranch: envelope.baseBranch,
+            integrationBranch: envelope.integrationBranch,
+            branch: workspace.branch,
+            worktreePath: workspace.worktreePath,
+            prFile: getIssueArtifactSet(issueRef.issue, envelope.targetRepo).prFile,
+          });
+          result.summary = `${result.summary ?? "PR artifact prepared."}
 
-GitHub PR: ${prResult.prUrl}`;
-        result.metadata = {
-          ...(result.metadata || {}),
-          branch: workspace.branch,
-          prUrl: prResult.prUrl,
-          changedFiles: prResult.changedFiles,
-        };
-        patch = {
-          branch: workspace.branch,
-          branchCreated: true,
-          prUrl: prResult.prUrl,
-          summary: result.summary,
-          nextAction: `PR created on GitHub: ${prResult.prUrl}`,
-          changedFiles: prResult.changedFiles,
-        };
+Issue PR target: ${envelope.integrationBranch}
+GitHub PR: ${prResult.prUrl}
+Merged into integration: ${prResult.merged ? "yes" : "no"}`;
+          result.metadata = {
+            ...(result.metadata || {}),
+            branch: workspace.branch,
+            prUrl: prResult.prUrl,
+            prNumber: prResult.prNumber,
+            changedFiles: prResult.changedFiles,
+            merged: prResult.merged,
+            mergeTarget: envelope.integrationBranch,
+          };
+          patch = {
+            branch: workspace.branch,
+            branchCreated: workspace.remoteBranchExists,
+            prUrl: prResult.prUrl,
+            summary: result.summary,
+            nextAction: prResult.merged
+              ? `Issue PR merged into integration branch ${envelope.integrationBranch}: ${prResult.prUrl}`
+              : `Issue PR created on GitHub: ${prResult.prUrl}`,
+            changedFiles: prResult.changedFiles,
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const isPermissionBlock = /Resource not accessible by personal access token/i.test(message);
+          result = {
+            ...result,
+            ok: false,
+            outcome: isPermissionBlock ? "blocked" : "fatal_error",
+            finishedAt: nowIso(),
+            error: message,
+            blockReason: isPermissionBlock ? message : undefined,
+            summary: `${result.summary ?? "PR artifact prepared."}
+
+Issue PR target: ${envelope.integrationBranch}
+PR creation/merge failed: ${message}`,
+            metadata: {
+              ...(result.metadata || {}),
+              branch: workspace.branch,
+              mergeTarget: envelope.integrationBranch,
+              permissionBlocked: isPermissionBlock,
+            },
+          };
+          patch = {
+            branch: workspace.branch,
+            branchCreated: workspace.remoteBranchExists,
+            summary: result.summary,
+            nextAction: isPermissionBlock
+              ? "External blocker: GitHub token lacks pull-request permissions for create/view/merge."
+              : "PR creation failed; inspect worker log and retry after fixing the GitHub error.",
+            changedFiles: [],
+          };
+        }
       }
 
       execution = markPhaseResult(execution, nextPhase, result);
@@ -875,8 +1117,19 @@ GitHub PR: ${prResult.prUrl}`;
     }
   }
 
+  const finalPr = await ensureFinalPullRequest({
+    repoSlug: envelope.targetRepo,
+    repoPath,
+    baseBranch: envelope.baseBranch,
+    integrationBranch: envelope.integrationBranch,
+  });
+
   run = await refreshRunExecution({
     ...run,
+    integrationBranch: envelope.integrationBranch,
+    finalPrUrl: finalPr.prUrl,
+    finalPrNumber: finalPr.prNumber,
+    finalPrState: finalPr.state,
     status: "completed",
     execution: {
       ...(run.execution ?? createEmptyRunExecutionV2(envelope.profile, envelope.selectedIssues.length)),

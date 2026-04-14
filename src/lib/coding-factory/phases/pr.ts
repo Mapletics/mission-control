@@ -13,6 +13,7 @@ export function buildPrRequest(context: Omit<CodingFactoryPromptContext, "artifa
     repoSlug: context.repoSlug,
     repoPath: context.repoPath,
     baseBranch: context.baseBranch,
+    integrationBranch: context.integrationBranch,
     worktreePath: context.worktreePath,
     phase: "pr",
     prompt: buildPhasePrompt("pr", { ...context, artifacts }),

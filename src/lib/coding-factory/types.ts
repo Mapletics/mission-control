@@ -159,6 +159,7 @@ export type PhaseRunRequest = {
   repoSlug: string;
   repoPath: string;
   baseBranch: string;
+  integrationBranch?: string;
   /**
    * Optional isolated workspace chosen by the caller.
    * If absent, runners operate directly in repoPath.
@@ -225,5 +226,6 @@ export type CodingFactoryPromptContext = {
   repoSlug: string;
   repoPath: string;
   baseBranch: string;
+  integrationBranch?: string;
   artifacts: CodingFactoryPhaseArtifactSet;
 };

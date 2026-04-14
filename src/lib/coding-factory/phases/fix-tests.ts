@@ -13,6 +13,7 @@ export function buildFixTestsRequest(context: Omit<CodingFactoryPromptContext, "
     repoSlug: context.repoSlug,
     repoPath: context.repoPath,
     baseBranch: context.baseBranch,
+    integrationBranch: context.integrationBranch,
     worktreePath: context.worktreePath,
     phase: "fixTests",
     prompt: buildPhasePrompt("fixTests", { ...context, artifacts }),

@@ -91,10 +91,13 @@ function buildSubagentMessage(request: PhaseRunRequest, agentId: string): string
     `Assigned agent: ${agentId}.`,
     `Work only in: ${workspacePath}`,
     `Base branch: ${request.baseBranch}`,
+    request.integrationBranch ? `Integration branch: ${request.integrationBranch}` : null,
     "Success requires writing the required output artifact(s) to disk. Do not stop at a chat-only summary.",
     requiredInputs.length > 0 ? `Required input artifacts:\n- ${requiredInputs.join("\n- ")}` : "Required input artifacts: none.",
     requiredOutputs.length > 0 ? `Required output artifacts:\n- ${requiredOutputs.join("\n- ")}` : "Required output artifacts: none declared.",
-    "If you perform app work, keep the base branch anchored to the requested base branch.",
+    request.integrationBranch
+      ? `If you perform app work, keep ${request.baseBranch} as the long-lived base branch and do the issue work on top of ${request.integrationBranch}.`
+      : "If you perform app work, keep the base branch anchored to the requested base branch.",
     "After the artifact(s) exist, reply with a short status summary.",
     "",
     "PHASE INSTRUCTIONS",

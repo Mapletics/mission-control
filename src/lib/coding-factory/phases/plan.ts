@@ -13,6 +13,7 @@ export function buildPlanRequest(context: Omit<CodingFactoryPromptContext, "arti
     repoSlug: context.repoSlug,
     repoPath: context.repoPath,
     baseBranch: context.baseBranch,
+    integrationBranch: context.integrationBranch,
     phase: "plan",
     prompt: buildPhasePrompt("plan", { ...context, artifacts }),
     outputFiles: [artifacts.planFile],
