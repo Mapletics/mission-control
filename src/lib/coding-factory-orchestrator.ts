@@ -1,3 +1,4 @@
+import { deriveDefaultWorkingBranch } from "@/lib/coding-factory";
 import { getCanonicalPhaseSequence, getNextPhase } from "@/lib/coding-factory-phase-registry";
 import type {
   CodingFactoryBranchStartMode,
@@ -124,7 +125,7 @@ export function createCodingFactoryOrchestrator(input: CreateCodingFactoryOrches
   const profile = input.profile ?? "balanced";
   const launchMode = input.launchMode ?? "legacy-adapter";
   const branchStrategy = input.branchStrategy ?? "shared";
-  const workingBranch = input.workingBranch ?? deriveIntegrationBranchName(input.runId);
+  const workingBranch = input.workingBranch ?? deriveDefaultWorkingBranch(input.baseBranch);
   const branchStartMode = input.branchStartMode ?? "create-from-base";
   const integrationBranch = branchStrategy === "isolated" ? (input.integrationBranch ?? deriveIntegrationBranchName(input.runId)) : undefined;
 
