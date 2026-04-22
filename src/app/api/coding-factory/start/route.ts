@@ -13,6 +13,9 @@ export async function POST(request: NextRequest) {
       mode: body?.mode === "batch" ? "batch" : intake.mode,
       targetRepo: typeof body?.targetRepo === "string" ? body.targetRepo : intake.targetRepo,
       baseBranch: typeof body?.baseBranch === "string" ? body.baseBranch : intake.baseBranch,
+      branchStrategy: body?.branchStrategy === "isolated" ? "isolated" : intake.branchStrategy,
+      workingBranch: typeof body?.workingBranch === "string" && body.workingBranch.trim() ? body.workingBranch.trim() : intake.workingBranch,
+      branchStartMode: body?.branchStartMode === "existing" ? "existing" : intake.branchStartMode,
       selectedIssues: intake.selectedIssues,
       source: "start",
     });

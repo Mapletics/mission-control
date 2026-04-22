@@ -13,6 +13,8 @@ export function buildPrRequest(context: Omit<CodingFactoryPromptContext, "artifa
     repoSlug: context.repoSlug,
     repoPath: context.repoPath,
     baseBranch: context.baseBranch,
+    branchStrategy: context.branchStrategy,
+    workingBranch: context.workingBranch,
     integrationBranch: context.integrationBranch,
     worktreePath: context.worktreePath,
     phase: "pr",

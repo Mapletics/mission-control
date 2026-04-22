@@ -13,6 +13,8 @@ export function buildResearchRequest(context: Omit<CodingFactoryPromptContext, "
     repoSlug: context.repoSlug,
     repoPath: context.repoPath,
     baseBranch: context.baseBranch,
+    branchStrategy: context.branchStrategy,
+    workingBranch: context.workingBranch,
     integrationBranch: context.integrationBranch,
     phase: "research",
     prompt: buildPhasePrompt("research", { ...context, artifacts }),

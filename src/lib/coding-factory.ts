@@ -33,6 +33,8 @@ import type {
   CodingFactoryProfile,
   CodingFactoryRunExecutionV2,
   CodingFactoryRunnerResultKind,
+  type CodingFactoryBranchStartMode,
+  type CodingFactoryBranchStrategy,
 } from "@/lib/coding-factory/types";
 
 export const WORK_STATE_DIR = process.env.WORK_STATE_DIR || "/home/ubuntu/repos/.work-state";
@@ -44,6 +46,8 @@ export const TERMINAL_PHASES = new Set(["done", "pr-created", "blocked", "aborte
 
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const BRANCH_PATTERN = /^[A-Za-z0-9._\/-]+$/;
+const DEFAULT_BRANCH_STRATEGY: CodingFactoryBranchStrategy = "shared";
+const DEFAULT_BRANCH_START_MODE: CodingFactoryBranchStartMode = "create-from-base";
 
 export type IssueHistory = {
   phase: string;
@@ -91,6 +95,9 @@ export type IssueHandover = {
 export type IssueState = IssueRef & {
   version: number;
   branch: string;
+  branchMode?: CodingFactoryBranchStrategy;
+  workingBranch?: string;
+  worktree?: string | null;
   baseBranch: string;
   size: string;
   phase: string;
@@ -104,6 +111,11 @@ export type IssueState = IssueRef & {
   duration?: number | null;
   history: IssueHistory[];
   handover?: IssueHandover;
+  issueStartSha?: string;
+  issueEndSha?: string;
+  issueDiffBaseSha?: string;
+  commitSha?: string;
+  commitMessage?: string;
   profile?: CodingFactoryProfile;
   result?: CodingFactoryRunnerResultKind;
   execution?: CodingFactoryIssueExecutionV2;
@@ -130,11 +142,14 @@ export type CodingFactoryRunSource = "draft" | "persisted" | "legacy-bridge";
 export type CodingFactoryIntakeIssue = IssueRef;
 
 export type CodingFactoryIntakeState = {
-  version: 1;
+  version: number;
   updatedAt: string;
   mode: CodingFactoryMode;
   targetRepo: string;
   baseBranch: string;
+  branchStrategy: CodingFactoryBranchStrategy;
+  workingBranch: string;
+  branchStartMode: CodingFactoryBranchStartMode;
   selectedIssues: CodingFactoryIntakeIssue[];
 };
 
@@ -145,7 +160,11 @@ export type CodingFactoryRunState = {
   mode: CodingFactoryMode;
   targetRepo: string;
   baseBranch: string;
+  branchStrategy: CodingFactoryBranchStrategy;
+  workingBranch: string;
+  branchStartMode: CodingFactoryBranchStartMode;
   integrationBranch?: string | null;
+  currentHeadSha?: string | null;
   selectedIssues: IssueRef[];
   status: CodingFactoryRunStatus;
   state: CodingFactoryRunStateName;
@@ -181,6 +200,8 @@ export type CodingFactorySupervisorState = {
   pid: number | null;
   targetRepo: string;
   baseBranch: string;
+  branchStrategy: CodingFactoryBranchStrategy;
+  workingBranch: string;
   issueKeys: string[];
   issueNumbers: number[];
   selectedIssues?: IssueRef[];
@@ -203,6 +224,8 @@ export type CodingFactorySupervisorHealth = {
   source: CodingFactorySupervisorState["source"] | null;
   targetRepo: string | null;
   baseBranch: string | null;
+  branchStrategy: CodingFactoryBranchStrategy | null;
+  workingBranch: string | null;
   issueKeys: string[];
   issueNumbers: number[];
   logPath: string | null;
@@ -219,6 +242,8 @@ export type CodingFactoryStatus = {
   isRunning: boolean;
   status: string;
   state: CodingFactoryRunStateName;
+  branchStrategy: CodingFactoryBranchStrategy;
+  workingBranch: string;
   integrationBranch: string | null;
   finalPrUrl: string | null;
   finalPrNumber: number | null;
@@ -302,6 +327,12 @@ export async function saveIssueState(input: unknown): Promise<IssueState> {
 
 export const DEFAULT_TARGET_REPO = "Mapletics/App_frontend";
 
+export function deriveDefaultWorkingBranch(baseBranch: string): string {
+  const normalizedBase = (baseBranch || "dev").trim() || "dev";
+  const sanitizedBase = normalizedBase.replace(/[^A-Za-z0-9._/-]+/g, "-");
+  return `coding-factory/${sanitizedBase}`;
+}
+
 function isIsoDate(value: unknown): value is string {
   return typeof value === "string" && !Number.isNaN(new Date(value).getTime());
 }
@@ -342,12 +373,16 @@ export function createIssueRef(issue: number, repo: string, title?: string): Iss
 }
 
 export function defaultIntakeState(): CodingFactoryIntakeState {
+  const baseBranch = "dev";
   return {
-    version: 1,
+    version: 2,
     updatedAt: new Date().toISOString(),
     mode: "single",
     targetRepo: DEFAULT_TARGET_REPO,
-    baseBranch: "dev",
+    baseBranch,
+    branchStrategy: DEFAULT_BRANCH_STRATEGY,
+    workingBranch: deriveDefaultWorkingBranch(baseBranch),
+    branchStartMode: DEFAULT_BRANCH_START_MODE,
     selectedIssues: [],
   };
 }
@@ -684,7 +719,11 @@ export function createDraftRunState(
     mode: intake.mode,
     targetRepo: intake.targetRepo,
     baseBranch: intake.baseBranch,
-    integrationBranch: null,
+    branchStrategy: intake.branchStrategy,
+    workingBranch: intake.workingBranch,
+    branchStartMode: intake.branchStartMode,
+    integrationBranch: intake.branchStrategy === "isolated" ? null : null,
+    currentHeadSha: null,
     selectedIssues: intake.selectedIssues,
     status,
     state: current.state,
@@ -903,6 +942,9 @@ function normalizeIssueStateRecord(input: unknown): IssueState | null {
     issueKey,
     title,
     branch: typeof payload.branch === "string" ? payload.branch : "",
+    branchMode: payload.branchMode === "isolated" ? "isolated" : payload.branchMode === "shared" ? "shared" : undefined,
+    workingBranch: typeof payload.workingBranch === "string" ? payload.workingBranch : undefined,
+    worktree: typeof payload.worktree === "string" ? payload.worktree : null,
     baseBranch: typeof payload.baseBranch === "string" ? payload.baseBranch : "dev",
     size: typeof payload.size === "string" ? payload.size : "",
     phase: effectivePhase,
@@ -916,6 +958,11 @@ function normalizeIssueStateRecord(input: unknown): IssueState | null {
     duration: typeof payload.duration === "number" || payload.duration === null ? payload.duration : null,
     history,
     handover,
+    issueStartSha: typeof payload.issueStartSha === "string" ? payload.issueStartSha : undefined,
+    issueEndSha: typeof payload.issueEndSha === "string" ? payload.issueEndSha : undefined,
+    issueDiffBaseSha: typeof payload.issueDiffBaseSha === "string" ? payload.issueDiffBaseSha : undefined,
+    commitSha: typeof payload.commitSha === "string" ? payload.commitSha : undefined,
+    commitMessage: typeof payload.commitMessage === "string" ? payload.commitMessage : undefined,
     profile,
     result: normalizeRunnerResult(payload.result),
     execution,
@@ -997,6 +1044,13 @@ export function normalizeIntakeState(input: unknown): CodingFactoryIntakeState {
   const baseBranchRaw = typeof payload.baseBranch === "string" ? payload.baseBranch.trim() : fallback.baseBranch;
   const baseBranch = baseBranchRaw && BRANCH_PATTERN.test(baseBranchRaw) ? baseBranchRaw : fallback.baseBranch;
 
+  const branchStrategy: CodingFactoryBranchStrategy = payload.branchStrategy === "isolated" ? "isolated" : DEFAULT_BRANCH_STRATEGY;
+  const branchStartMode: CodingFactoryBranchStartMode = payload.branchStartMode === "existing" ? "existing" : DEFAULT_BRANCH_START_MODE;
+  const workingBranchRaw = typeof payload.workingBranch === "string" ? payload.workingBranch.trim() : "";
+  const workingBranch = workingBranchRaw && BRANCH_PATTERN.test(workingBranchRaw)
+    ? workingBranchRaw
+    : deriveDefaultWorkingBranch(baseBranch);
+
   const mode = payload.mode === "batch" ? "batch" : "single";
 
   const selectedIssuesRaw = Array.isArray(payload.selectedIssues) ? payload.selectedIssues : [];
@@ -1008,11 +1062,14 @@ export function normalizeIntakeState(input: unknown): CodingFactoryIntakeState {
   );
 
   return {
-    version: 1,
+    version: typeof payload.version === "number" ? Math.max(payload.version, 2) : 2,
     updatedAt: new Date().toISOString(),
     mode,
     targetRepo,
     baseBranch,
+    branchStrategy,
+    workingBranch,
+    branchStartMode,
     selectedIssues: mode === "single" ? selectedIssues.slice(0, 1) : selectedIssues,
   };
 }
@@ -1030,6 +1087,12 @@ export function normalizeRunState(input: unknown, intakeFallback?: CodingFactory
 
   const mode = payload.mode === "batch" ? "batch" : "single";
   const runId = typeof payload.runId === "string" && payload.runId.trim() ? payload.runId.trim() : fallback.runId;
+  const branchStrategy: CodingFactoryBranchStrategy = payload.branchStrategy === "isolated" ? "isolated" : intake.branchStrategy;
+  const branchStartMode: CodingFactoryBranchStartMode = payload.branchStartMode === "existing" ? "existing" : intake.branchStartMode;
+  const workingBranchRaw = typeof payload.workingBranch === "string" ? payload.workingBranch.trim() : intake.workingBranch;
+  const workingBranch = workingBranchRaw && BRANCH_PATTERN.test(workingBranchRaw)
+    ? workingBranchRaw
+    : deriveDefaultWorkingBranch(baseBranch);
 
   const selectedIssuesRaw = Array.isArray(payload.selectedIssues) ? payload.selectedIssues : [];
   const selectedIssues = uniqueIssues(
@@ -1065,7 +1128,11 @@ export function normalizeRunState(input: unknown, intakeFallback?: CodingFactory
     mode,
     targetRepo,
     baseBranch,
+    branchStrategy,
+    workingBranch,
+    branchStartMode,
     integrationBranch: typeof payload.integrationBranch === "string" ? payload.integrationBranch : null,
+    currentHeadSha: typeof payload.currentHeadSha === "string" ? payload.currentHeadSha : null,
     selectedIssues: mode === "single" ? selectedIssues.slice(0, 1) : selectedIssues,
     status,
     state,
@@ -1214,7 +1281,11 @@ function buildLegacyBridgeRunState(
     mode: inferredMode,
     targetRepo,
     baseBranch: selectedIssueStates[0]?.baseBranch || existingRun.baseBranch || intake.baseBranch,
+    branchStrategy: "isolated",
+    workingBranch: existingRun.workingBranch || existingRun.integrationBranch || nightMode?.integrationBranch || deriveDefaultWorkingBranch(selectedIssueStates[0]?.baseBranch || existingRun.baseBranch || intake.baseBranch),
+    branchStartMode: existingRun.branchStartMode || DEFAULT_BRANCH_START_MODE,
     integrationBranch: existingRun.integrationBranch ?? nightMode?.integrationBranch ?? null,
+    currentHeadSha: existingRun.currentHeadSha ?? null,
     selectedIssues,
     status: legacyRunStatusFromState(current.state, { hasSelectedIssues: selectedIssues.length > 0 }),
     state: current.state,
@@ -1396,6 +1467,8 @@ function isValidSupervisorState(input: unknown): input is CodingFactorySuperviso
     && ["running", "finished", "failed", "blocked"].includes(payload.status)
     && typeof payload.targetRepo === "string"
     && typeof payload.baseBranch === "string"
+    && typeof payload.workingBranch === "string"
+    && ["shared", "isolated"].includes(String(payload.branchStrategy))
     && Array.isArray(payload.issueKeys)
     && Array.isArray(payload.issueNumbers)
     && Array.isArray(payload.command)
@@ -1444,6 +1517,8 @@ export async function readSupervisorHealth(): Promise<CodingFactorySupervisorHea
       source: null,
       targetRepo: null,
       baseBranch: null,
+      branchStrategy: null,
+      workingBranch: null,
       issueKeys: [],
       issueNumbers: [],
       logPath: null,
@@ -1470,6 +1545,8 @@ export async function readSupervisorHealth(): Promise<CodingFactorySupervisorHea
     source: state.source,
     targetRepo: state.targetRepo,
     baseBranch: state.baseBranch,
+    branchStrategy: state.branchStrategy,
+    workingBranch: state.workingBranch,
     issueKeys: [...state.issueKeys],
     issueNumbers: [...state.issueNumbers],
     logPath: state.logPath,
@@ -1508,6 +1585,8 @@ export async function getCodingFactoryStatus(): Promise<CodingFactoryStatus> {
     isRunning,
     status: isRunning ? "running" : (activeRun.status ?? "unknown"),
     state: activeRun.state,
+    branchStrategy: activeRun.branchStrategy ?? run.branchStrategy ?? intake.branchStrategy,
+    workingBranch: activeRun.workingBranch ?? run.workingBranch ?? intake.workingBranch,
     integrationBranch: activeRun.integrationBranch ?? run.integrationBranch ?? nightMode?.integrationBranch ?? null,
     finalPrUrl: activeRun.finalPrUrl ?? run.finalPrUrl ?? null,
     finalPrNumber: activeRun.finalPrNumber ?? run.finalPrNumber ?? null,

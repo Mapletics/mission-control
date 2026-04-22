@@ -132,10 +132,13 @@ async function materializeLocalPrArtifact(request: PhaseRunRequest): Promise<str
 
   const workspace = request.worktreePath || request.repoPath;
   const branch = await tryRunGit(workspace, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const committedRange = request.issueDiffBaseSha
+    ? `${request.issueDiffBaseSha}..${request.issueDiffHeadSha || "HEAD"}`
+    : `origin/${request.integrationBranch || request.baseBranch}...HEAD`;
   const committedChanged = await tryRunGit(workspace, [
     "diff",
     "--name-only",
-    `origin/${request.integrationBranch || request.baseBranch}...HEAD`,
+    committedRange,
   ]);
   const workingTreeChanged = await tryRunGit(workspace, ["diff", "--name-only"]);
   const stagedChanged = await tryRunGit(workspace, ["diff", "--name-only", "--cached"]);
@@ -161,14 +164,16 @@ async function materializeLocalPrArtifact(request: PhaseRunRequest): Promise<str
     "",
     `## Branches`,
     `- Base branch: ${request.baseBranch}`,
+    `- Branch strategy: ${request.branchStrategy || "shared"}`,
+    request.workingBranch ? `- Working branch: ${request.workingBranch}` : null,
     request.integrationBranch ? `- Integration branch: ${request.integrationBranch}` : null,
-    branch ? `- Issue branch: ${branch}` : null,
+    branch ? `- Active branch: ${branch}` : null,
     "",
     `## Scope`,
     request.issueTitle ? `- Issue: ${request.issueTitle}` : `- Issue #${request.issueNumber}`,
-    request.integrationBranch
-      ? `- This issue PR targets \`${request.integrationBranch}\`; the final integration PR targets \`${request.baseBranch}\`.`
-      : `- This issue PR targets \`${request.baseBranch}\`.`,
+    request.branchStrategy === "isolated"
+      ? `- This issue PR targets \`${request.integrationBranch || request.baseBranch}\`; the final integration PR targets \`${request.baseBranch}\`.`
+      : `- This issue stays on shared working branch \`${request.workingBranch || branch || request.baseBranch}\`; the final PR targets \`${request.baseBranch}\`.`,
     changedFiles.length > 0 ? `- Changed files: ${changedFiles.join(", ")}` : "- Changed files: see commit diff",
     "",
     `## Implementation summary`,

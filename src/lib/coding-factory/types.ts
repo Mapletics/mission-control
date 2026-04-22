@@ -41,6 +41,8 @@ export type CodingFactoryCoreSubagentPhase = typeof CODING_FACTORY_CORE_SUBAGENT
 export type CodingFactoryBackend = typeof CODING_FACTORY_BACKENDS[number];
 export type CodingFactoryProfile = typeof CODING_FACTORY_PROFILES[number];
 export type CodingFactoryRunnerResultKind = typeof CODING_FACTORY_RUNNER_RESULT_KINDS[number];
+export type CodingFactoryBranchStrategy = "shared" | "isolated";
+export type CodingFactoryBranchStartMode = "existing" | "create-from-base";
 
 export type CodingFactoryFallbackTarget = {
   backend: CodingFactoryBackend;
@@ -159,7 +161,11 @@ export type PhaseRunRequest = {
   repoSlug: string;
   repoPath: string;
   baseBranch: string;
+  branchStrategy?: CodingFactoryBranchStrategy;
+  workingBranch?: string;
   integrationBranch?: string;
+  issueDiffBaseSha?: string;
+  issueDiffHeadSha?: string;
   /**
    * Optional isolated workspace chosen by the caller.
    * If absent, runners operate directly in repoPath.
@@ -226,6 +232,10 @@ export type CodingFactoryPromptContext = {
   repoSlug: string;
   repoPath: string;
   baseBranch: string;
+  branchStrategy?: CodingFactoryBranchStrategy;
+  workingBranch?: string;
   integrationBranch?: string;
+  issueDiffBaseSha?: string;
+  issueDiffHeadSha?: string;
   artifacts: CodingFactoryPhaseArtifactSet;
 };

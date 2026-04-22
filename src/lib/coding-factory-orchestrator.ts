@@ -1,5 +1,8 @@
+import { deriveDefaultWorkingBranch } from "@/lib/coding-factory";
 import { getCanonicalPhaseSequence, getNextPhase } from "@/lib/coding-factory-phase-registry";
 import type {
+  CodingFactoryBranchStartMode,
+  CodingFactoryBranchStrategy,
   CodingFactoryIssueExecutionV2,
   CodingFactoryPhase,
   CodingFactoryProfile,
@@ -17,7 +20,10 @@ export type CodingFactoryOrchestratorLaunchEnvelope = {
   runId: string;
   targetRepo: string;
   baseBranch: string;
-  integrationBranch: string;
+  branchStrategy: CodingFactoryBranchStrategy;
+  workingBranch: string;
+  branchStartMode: CodingFactoryBranchStartMode;
+  integrationBranch?: string;
   issueKeys: string[];
   selectedIssues: Array<{ issue: number; issueKey: string; title: string }>;
   profile: CodingFactoryProfile;
@@ -46,6 +52,9 @@ export type CreateCodingFactoryOrchestratorInput = {
   runId: string;
   targetRepo: string;
   baseBranch: string;
+  branchStrategy?: CodingFactoryBranchStrategy;
+  workingBranch?: string;
+  branchStartMode?: CodingFactoryBranchStartMode;
   integrationBranch?: string;
   selectedIssues: Array<{ issue: number; issueKey: string; title: string }>;
   profile?: CodingFactoryProfile;
@@ -115,7 +124,10 @@ export function resolvePhaseTransition(phase: CodingFactoryPhase, result: Pick<P
 export function createCodingFactoryOrchestrator(input: CreateCodingFactoryOrchestratorInput): CodingFactoryOrchestrator {
   const profile = input.profile ?? "balanced";
   const launchMode = input.launchMode ?? "legacy-adapter";
-  const integrationBranch = input.integrationBranch ?? deriveIntegrationBranchName(input.runId);
+  const branchStrategy = input.branchStrategy ?? "shared";
+  const workingBranch = input.workingBranch ?? deriveDefaultWorkingBranch(input.baseBranch);
+  const branchStartMode = input.branchStartMode ?? "create-from-base";
+  const integrationBranch = branchStrategy === "isolated" ? (input.integrationBranch ?? deriveIntegrationBranchName(input.runId)) : undefined;
 
   return {
     createLaunchEnvelope() {
@@ -125,6 +137,9 @@ export function createCodingFactoryOrchestrator(input: CreateCodingFactoryOrches
         runId: input.runId,
         targetRepo: input.targetRepo,
         baseBranch: input.baseBranch,
+        branchStrategy,
+        workingBranch,
+        branchStartMode,
         integrationBranch,
         issueKeys: input.selectedIssues.map((issue) => issue.issueKey),
         selectedIssues: input.selectedIssues,
