@@ -57,15 +57,24 @@ type QueueCounts = {
 type IssuePersistencePatch = {
   branch?: string | null;
   branchCreated?: boolean;
+  branchMode?: "shared" | "isolated";
+  workingBranch?: string | null;
+  worktree?: string | null;
   prUrl?: string | null;
   summary?: string;
   nextAction?: string;
   changedFiles?: string[];
+  issueStartSha?: string;
+  issueEndSha?: string;
+  issueDiffBaseSha?: string;
+  commitSha?: string;
+  commitMessage?: string;
 };
 
 type IssueWorkspace = {
   branch: string;
-  worktreePath: string;
+  branchStrategy: "shared" | "isolated";
+  worktreePath?: string;
   remoteBranchExists: boolean;
 };
 
@@ -80,6 +89,15 @@ type FinalPullRequestResult = {
   prUrl: string | null;
   prNumber: number | null;
   state: string | null;
+};
+
+type SharedIssueCommitResult = {
+  issueStartSha: string;
+  issueEndSha: string;
+  issueDiffBaseSha: string;
+  commitSha: string | null;
+  commitMessage: string | null;
+  changedFiles: string[];
 };
 
 function parseEnvelope(): CodingFactoryOrchestratorLaunchEnvelope {
@@ -166,6 +184,59 @@ function parsePrNumber(prUrl: string | null | undefined): number | null {
   return match ? Number.parseInt(match[1], 10) : null;
 }
 
+async function ensureCleanWorkingTree(repoPath: string): Promise<void> {
+  const status = await runCommand(["git", "status", "--porcelain"], repoPath);
+  if (status.trim()) {
+    throw new Error(`Repository ${repoPath} has uncommitted changes. Commit/stash them before starting Coding Factory.`);
+  }
+}
+
+async function getHeadSha(repoPath: string): Promise<string> {
+  return runCommand(["git", "rev-parse", "HEAD"], repoPath);
+}
+
+async function ensureSharedBranchWorkspace(input: {
+  repoPath: string;
+  baseBranch: string;
+  workingBranch: string;
+  branchStartMode: "existing" | "create-from-base";
+}): Promise<IssueWorkspace> {
+  await ensureCleanWorkingTree(input.repoPath);
+  await runCommand(["git", "fetch", "origin", input.baseBranch], input.repoPath);
+
+  const localExists = (await tryRunCommand(["git", "show-ref", "--verify", `refs/heads/${input.workingBranch}`], input.repoPath)).ok;
+  const remoteExists = (await tryRunCommand(["git", "ls-remote", "--exit-code", "--heads", "origin", input.workingBranch], input.repoPath)).ok;
+
+  if (input.branchStartMode === "existing") {
+    if (remoteExists) {
+      await runCommand(["git", "fetch", "origin", `${input.workingBranch}:${input.workingBranch}`], input.repoPath);
+    } else if (!localExists) {
+      throw new Error(`Working branch ${input.workingBranch} does not exist locally or on origin. Choose create-from-base or create the branch first.`);
+    }
+
+    if (localExists || remoteExists) {
+      await runCommand(["git", "switch", input.workingBranch], input.repoPath);
+    }
+    if (remoteExists) {
+      await runCommand(["git", "reset", "--hard", `origin/${input.workingBranch}`], input.repoPath);
+    }
+  } else {
+    if (remoteExists) {
+      throw new Error(`Working branch ${input.workingBranch} already exists on origin. Use existing mode or choose a new working branch.`);
+    }
+    await runCommand(["git", "switch", "-C", input.workingBranch, `origin/${input.baseBranch}`], input.repoPath);
+  }
+
+  await ensureCleanWorkingTree(input.repoPath);
+
+  return {
+    branch: input.workingBranch,
+    branchStrategy: "shared",
+    worktreePath: undefined,
+    remoteBranchExists: remoteExists,
+  };
+}
+
 async function ensureIntegrationBranch(input: {
   repoPath: string;
   baseBranch: string;
@@ -238,6 +309,7 @@ async function ensureIssueWorkspace(input: {
 
   return {
     branch,
+    branchStrategy: "isolated",
     worktreePath,
     remoteBranchExists,
   };
@@ -586,6 +658,9 @@ async function persistIssue(
     issueKey: issueRef.issueKey,
     title: existing?.title ?? issueRef.title,
     branch: patch?.branch ?? existing?.branch ?? "",
+    branchMode: patch?.branchMode ?? existing?.branchMode,
+    workingBranch: patch?.workingBranch ?? existing?.workingBranch ?? run.workingBranch,
+    worktree: patch?.worktree ?? existing?.worktree ?? null,
     baseBranch: run.baseBranch,
     size: existing?.size ?? issueRef.repo.split("/")[1] ?? "",
     phase: snapshot.phase,
@@ -626,6 +701,11 @@ async function persistIssue(
       changedFiles: patch?.changedFiles ?? existing?.handover?.changedFiles,
       validation: existing?.handover?.validation,
     },
+    issueStartSha: patch?.issueStartSha ?? existing?.issueStartSha,
+    issueEndSha: patch?.issueEndSha ?? existing?.issueEndSha,
+    issueDiffBaseSha: patch?.issueDiffBaseSha ?? existing?.issueDiffBaseSha,
+    commitSha: patch?.commitSha ?? existing?.commitSha,
+    commitMessage: patch?.commitMessage ?? existing?.commitMessage,
     profile: run.profile,
     result: result?.outcome ?? existing?.result,
     execution,
@@ -722,11 +802,14 @@ async function refreshRunExecution(run: CodingFactoryRunState): Promise<CodingFa
   };
 
   const intake: CodingFactoryIntakeState = {
-    version: 1,
+    version: 2,
     updatedAt: nowIso(),
     mode: run.mode,
     targetRepo: run.targetRepo,
     baseBranch: run.baseBranch,
+    branchStrategy: run.branchStrategy,
+    workingBranch: run.workingBranch,
+    branchStartMode: run.branchStartMode,
     selectedIssues: run.selectedIssues,
   };
 
@@ -761,21 +844,63 @@ async function updateSupervisor(patch: Record<string, unknown>): Promise<void> {
   });
 }
 
+async function finalizeSharedIssueCommit(input: {
+  repoPath: string;
+  issueNumber: number;
+  issueTitle: string;
+  issueStartSha: string;
+}): Promise<SharedIssueCommitResult> {
+  const issueDiffBaseSha = input.issueStartSha;
+  const status = await runCommand(["git", "status", "--porcelain"], input.repoPath);
+  const commitMessage = `fix(issue-${input.issueNumber}): ${input.issueTitle}`;
+
+  if (!status.trim()) {
+    return {
+      issueStartSha: input.issueStartSha,
+      issueEndSha: input.issueStartSha,
+      issueDiffBaseSha,
+      commitSha: null,
+      commitMessage: null,
+      changedFiles: [],
+    };
+  }
+
+  await runCommand(["git", "add", "-A"], input.repoPath);
+  await runCommand(["git", "commit", "-m", commitMessage], input.repoPath);
+  const commitSha = await getHeadSha(input.repoPath);
+  const changedFilesOutput = await runCommand(["git", "diff", "--name-only", `${input.issueStartSha}..${commitSha}`], input.repoPath);
+
+  return {
+    issueStartSha: input.issueStartSha,
+    issueEndSha: commitSha,
+    issueDiffBaseSha,
+    commitSha,
+    commitMessage,
+    changedFiles: changedFilesOutput.split("\n").map((line) => line.trim()).filter(Boolean),
+  };
+}
+
+async function ensureBranchPushed(repoPath: string, branch: string): Promise<void> {
+  await runCommand(["git", "push", "--set-upstream", "origin", branch], repoPath);
+}
+
 async function ensureFinalPullRequest(input: {
   repoSlug: string;
   repoPath: string;
   baseBranch: string;
-  integrationBranch: string;
+  headBranch: string;
+  title: string;
+  body: string;
 }): Promise<FinalPullRequestResult> {
   await runCommand(["git", "fetch", "origin", input.baseBranch], input.repoPath);
-  await runCommand(["git", "fetch", "origin", input.integrationBranch], input.repoPath);
+  await runCommand(["git", "fetch", "origin", input.headBranch], input.repoPath);
 
   const aheadBehind = await runCommand([
     "git",
     "rev-list",
     "--left-right",
     "--count",
-    `origin/${input.baseBranch}...origin/${input.integrationBranch}`,
+    `origin/${input.baseBranch}...origin/${input.headBranch}`,
   ], input.repoPath);
   const [, aheadRaw = "0"] = aheadBehind.split(/\s+/);
   const ahead = Number.parseInt(aheadRaw, 10);
@@ -794,7 +919,7 @@ async function ensureFinalPullRequest(input: {
     "--repo",
     input.repoSlug,
     "--head",
-    input.integrationBranch,
+    input.headBranch,
     "--base",
     input.baseBranch,
     "--state",
@@ -824,11 +949,11 @@ async function ensureFinalPullRequest(input: {
     "--base",
     input.baseBranch,
     "--head",
-    input.integrationBranch,
+    input.headBranch,
     "--title",
-    `chore: merge ${input.integrationBranch} into ${input.baseBranch}`,
+    input.title,
     "--body",
-    `Automated Coding Factory final integration PR.\n\nBase branch: ${input.baseBranch}\nIntegration branch: ${input.integrationBranch}`,
+    input.body,
   ], input.repoPath)).trim();
 
   return {
@@ -844,7 +969,11 @@ function buildPhaseRequest(phase: CodingFactoryPhase, input: {
   repoSlug: string;
   repoPath: string;
   baseBranch: string;
-  integrationBranch: string;
+  branchStrategy: "shared" | "isolated";
+  workingBranch: string;
+  integrationBranch?: string;
+  issueDiffBaseSha?: string;
+  issueDiffHeadSha?: string;
   worktreePath?: string;
 }) {
   const context = {
@@ -853,28 +982,51 @@ function buildPhaseRequest(phase: CodingFactoryPhase, input: {
     repoSlug: input.repoSlug,
     repoPath: input.repoPath,
     baseBranch: input.baseBranch,
+    branchStrategy: input.branchStrategy,
+    workingBranch: input.workingBranch,
     integrationBranch: input.integrationBranch,
+    issueDiffBaseSha: input.issueDiffBaseSha,
+    issueDiffHeadSha: input.issueDiffHeadSha,
     worktreePath: input.worktreePath,
   };
 
+  let request: Omit<import("@/lib/coding-factory/types").PhaseRunRequest, "backend">;
+
   switch (phase) {
     case "research":
-      return buildResearchRequest(context);
+      request = buildResearchRequest(context);
+      break;
     case "plan":
-      return buildPlanRequest(context);
+      request = buildPlanRequest(context);
+      break;
     case "implement":
-      return buildImplementRequest(context);
+      request = buildImplementRequest(context);
+      break;
     case "review":
-      return buildReviewRequest(context);
+      request = buildReviewRequest(context);
+      break;
     case "fixAnalyze":
-      return buildFixAnalyzeRequest(context);
+      request = buildFixAnalyzeRequest(context);
+      break;
     case "fixTests":
-      return buildFixTestsRequest(context);
+      request = buildFixTestsRequest(context);
+      break;
     case "pr":
-      return buildPrRequest(context);
+      request = buildPrRequest(context);
+      break;
     default:
       throw new Error(`Unsupported worker phase: ${phase}`);
   }
+
+  return {
+    ...request,
+    branchStrategy: input.branchStrategy,
+    workingBranch: input.workingBranch,
+    integrationBranch: input.integrationBranch,
+    issueDiffBaseSha: input.issueDiffBaseSha,
+    issueDiffHeadSha: input.issueDiffHeadSha,
+    worktreePath: input.worktreePath,
+  };
 }
 
 async function main() {
@@ -884,6 +1036,9 @@ async function main() {
     runId: envelope.runId,
     targetRepo: envelope.targetRepo,
     baseBranch: envelope.baseBranch,
+    branchStrategy: envelope.branchStrategy,
+    workingBranch: envelope.workingBranch,
+    branchStartMode: envelope.branchStartMode,
     integrationBranch: envelope.integrationBranch,
     selectedIssues: envelope.selectedIssues,
     profile: envelope.profile,
@@ -891,11 +1046,14 @@ async function main() {
   });
 
   const intake: CodingFactoryIntakeState = {
-    version: 1,
+    version: 2,
     updatedAt: nowIso(),
     mode: envelope.selectedIssues.length > 1 ? "batch" : "single",
     targetRepo: envelope.targetRepo,
     baseBranch: envelope.baseBranch,
+    branchStrategy: envelope.branchStrategy,
+    workingBranch: envelope.workingBranch,
+    branchStartMode: envelope.branchStartMode,
     selectedIssues: envelope.selectedIssues.map((issue) => ({
       issue: issue.issue,
       repo: envelope.targetRepo,
@@ -908,7 +1066,10 @@ async function main() {
   run = await refreshRunExecution({
     ...run,
     runId: envelope.runId,
-    integrationBranch: envelope.integrationBranch,
+    branchStrategy: envelope.branchStrategy,
+    workingBranch: envelope.workingBranch,
+    branchStartMode: envelope.branchStartMode,
+    integrationBranch: envelope.integrationBranch ?? null,
     finalPrUrl: run.finalPrUrl ?? null,
     finalPrNumber: run.finalPrNumber ?? null,
     finalPrState: run.finalPrState ?? null,
@@ -916,15 +1077,30 @@ async function main() {
     execution: run.execution ?? createEmptyRunExecutionV2(envelope.profile, envelope.selectedIssues.length),
   });
 
-  await ensureIntegrationBranch({
-    repoPath,
-    baseBranch: envelope.baseBranch,
-    integrationBranch: envelope.integrationBranch,
-  });
+  const sharedWorkspace = envelope.branchStrategy === "shared"
+    ? await ensureSharedBranchWorkspace({
+        repoPath,
+        baseBranch: envelope.baseBranch,
+        workingBranch: envelope.workingBranch,
+        branchStartMode: envelope.branchStartMode,
+      })
+    : null;
+
+  if (envelope.branchStrategy === "isolated" && envelope.integrationBranch) {
+    await ensureIntegrationBranch({
+      repoPath,
+      baseBranch: envelope.baseBranch,
+      integrationBranch: envelope.integrationBranch,
+    });
+  }
 
   run = await saveRunState({
     ...run,
-    integrationBranch: envelope.integrationBranch,
+    branchStrategy: envelope.branchStrategy,
+    workingBranch: envelope.workingBranch,
+    branchStartMode: envelope.branchStartMode,
+    integrationBranch: envelope.integrationBranch ?? null,
+    currentHeadSha: envelope.branchStrategy === "shared" ? await getHeadSha(repoPath) : run.currentHeadSha ?? null,
     updatedAt: nowIso(),
   }, intake);
 
@@ -942,38 +1118,68 @@ async function main() {
     const existing = allIssues.find((item) => item.issueKey === issueRef.issueKey);
     let execution = existing?.execution ?? createEmptyIssueExecutionV2(issueRef.issueKey, envelope.profile);
     let nextPhase = resolveNextPhase(execution);
-    let workspace: IssueWorkspace | null = existing?.branch
-      ? {
-          branch: existing.branch,
-          worktreePath: getIssueWorktreePath(issueRef.issue, envelope.targetRepo),
-          remoteBranchExists: Boolean(existing.handover?.branchCreated),
-        }
-      : null;
+    let issueStartSha = existing?.issueStartSha;
+    let workspace: IssueWorkspace | null = envelope.branchStrategy === "shared"
+      ? sharedWorkspace
+      : existing?.branch
+        ? {
+            branch: existing.branch,
+            branchStrategy: "isolated",
+            worktreePath: getIssueWorktreePath(issueRef.issue, envelope.targetRepo),
+            remoteBranchExists: Boolean(existing.handover?.branchCreated),
+          }
+        : null;
 
     while (nextPhase && SUPPORTED_PHASES.includes(nextPhase)) {
       if (CODE_PHASES.has(nextPhase)) {
-        workspace = await ensureIssueWorkspace({
-          issueNumber: issueRef.issue,
-          issueTitle: issueRef.title,
-          repoSlug: envelope.targetRepo,
-          repoPath,
-          baseBranch: envelope.baseBranch,
-          integrationBranch: envelope.integrationBranch,
-        });
-        await persistIssue(run, issueRef, execution, undefined, {
-          branch: workspace.branch,
-          branchCreated: workspace.remoteBranchExists,
-          summary: `Prepared issue branch ${workspace.branch} on top of ${envelope.integrationBranch} at ${workspace.worktreePath}.`,
-          nextAction: nextPhase === "implement"
-            ? "Issue branch prepared from the integration branch. Implementation can start on the isolated worktree."
-            : undefined,
-        });
+        if (envelope.branchStrategy === "shared") {
+          workspace = sharedWorkspace;
+          issueStartSha = issueStartSha || await getHeadSha(repoPath);
+          await persistIssue(run, issueRef, execution, undefined, {
+            branch: workspace?.branch,
+            branchMode: "shared",
+            workingBranch: envelope.workingBranch,
+            branchCreated: workspace?.remoteBranchExists ?? false,
+            worktree: null,
+            issueStartSha,
+            issueDiffBaseSha: issueStartSha,
+            summary: `Prepared shared working branch ${envelope.workingBranch} in ${repoPath}.`,
+            nextAction: nextPhase === "implement"
+              ? "Implementation can start directly on the shared working branch. Coding Factory will create one commit for this issue after the PR handover phase."
+              : undefined,
+          });
+        } else if (envelope.integrationBranch) {
+          workspace = await ensureIssueWorkspace({
+            issueNumber: issueRef.issue,
+            issueTitle: issueRef.title,
+            repoSlug: envelope.targetRepo,
+            repoPath,
+            baseBranch: envelope.baseBranch,
+            integrationBranch: envelope.integrationBranch,
+          });
+          await persistIssue(run, issueRef, execution, undefined, {
+            branch: workspace.branch,
+            branchMode: "isolated",
+            workingBranch: envelope.workingBranch,
+            worktree: workspace.worktreePath ?? null,
+            branchCreated: workspace.remoteBranchExists,
+            summary: `Prepared issue branch ${workspace.branch} on top of ${envelope.integrationBranch} at ${workspace.worktreePath}.`,
+            nextAction: nextPhase === "implement"
+              ? "Issue branch prepared from the integration branch. Implementation can start on the isolated worktree."
+              : undefined,
+          });
+        }
       }
 
       execution = markPhaseRunning(execution, nextPhase);
       await persistIssue(run, issueRef, execution, undefined, {
         branch: workspace?.branch,
+        branchMode: envelope.branchStrategy,
+        workingBranch: envelope.workingBranch,
+        worktree: workspace?.worktreePath ?? null,
         branchCreated: workspace?.remoteBranchExists ?? false,
+        issueStartSha,
+        issueDiffBaseSha: issueStartSha,
       });
 
       run = await refreshRunExecution({
@@ -999,7 +1205,10 @@ async function main() {
           repoSlug: envelope.targetRepo,
           repoPath,
           baseBranch: envelope.baseBranch,
+          branchStrategy: envelope.branchStrategy,
+          workingBranch: envelope.workingBranch,
           integrationBranch: envelope.integrationBranch,
+          issueDiffBaseSha: issueStartSha,
           worktreePath: workspace?.worktreePath,
         }),
         runId: envelope.runId,
@@ -1009,75 +1218,86 @@ async function main() {
       let patch: IssuePersistencePatch | undefined = workspace
         ? {
             branch: workspace.branch,
+            branchMode: envelope.branchStrategy,
+            workingBranch: envelope.workingBranch,
+            worktree: workspace.worktreePath ?? null,
             branchCreated: workspace.remoteBranchExists,
+            issueStartSha,
+            issueDiffBaseSha: issueStartSha,
           }
         : undefined;
 
       if (result.ok && nextPhase === "pr" && workspace) {
-        try {
-          const prResult = await ensurePullRequest({
-            issueNumber: issueRef.issue,
-            issueTitle: issueRef.title,
-            repoSlug: envelope.targetRepo,
-            baseBranch: envelope.baseBranch,
-            integrationBranch: envelope.integrationBranch,
-            branch: workspace.branch,
-            worktreePath: workspace.worktreePath,
-            prFile: getIssueArtifactSet(issueRef.issue, envelope.targetRepo).prFile,
-          });
-          result.summary = `${result.summary ?? "PR artifact prepared."}
-
-Issue PR target: ${envelope.integrationBranch}
-GitHub PR: ${prResult.prUrl}
-Merged into integration: ${prResult.merged ? "yes" : "no"}`;
-          result.metadata = {
-            ...(result.metadata || {}),
-            branch: workspace.branch,
-            prUrl: prResult.prUrl,
-            prNumber: prResult.prNumber,
-            changedFiles: prResult.changedFiles,
-            merged: prResult.merged,
-            mergeTarget: envelope.integrationBranch,
-          };
-          patch = {
-            branch: workspace.branch,
-            branchCreated: workspace.remoteBranchExists,
-            prUrl: prResult.prUrl,
-            summary: result.summary,
-            nextAction: prResult.merged
-              ? `Issue PR merged into integration branch ${envelope.integrationBranch}: ${prResult.prUrl}`
-              : `Issue PR created on GitHub: ${prResult.prUrl}`,
-            changedFiles: prResult.changedFiles,
-          };
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          const isPermissionBlock = /Resource not accessible by personal access token/i.test(message);
-          result = {
-            ...result,
-            ok: false,
-            outcome: isPermissionBlock ? "blocked" : "fatal_error",
-            finishedAt: nowIso(),
-            error: message,
-            blockReason: isPermissionBlock ? message : undefined,
-            summary: `${result.summary ?? "PR artifact prepared."}
-
-Issue PR target: ${envelope.integrationBranch}
-PR creation/merge failed: ${message}`,
-            metadata: {
+        if (envelope.branchStrategy === "isolated" && workspace.worktreePath && envelope.integrationBranch) {
+          try {
+            const prResult = await ensurePullRequest({
+              issueNumber: issueRef.issue,
+              issueTitle: issueRef.title,
+              repoSlug: envelope.targetRepo,
+              baseBranch: envelope.baseBranch,
+              integrationBranch: envelope.integrationBranch,
+              branch: workspace.branch,
+              worktreePath: workspace.worktreePath,
+              prFile: getIssueArtifactSet(issueRef.issue, envelope.targetRepo).prFile,
+            });
+            result.summary = `${result.summary ?? "PR artifact prepared."}\n\nIssue PR target: ${envelope.integrationBranch}\nGitHub PR: ${prResult.prUrl}\nMerged into integration: ${prResult.merged ? "yes" : "no"}`;
+            result.metadata = {
               ...(result.metadata || {}),
               branch: workspace.branch,
+              prUrl: prResult.prUrl,
+              prNumber: prResult.prNumber,
+              changedFiles: prResult.changedFiles,
+              merged: prResult.merged,
               mergeTarget: envelope.integrationBranch,
-              permissionBlocked: isPermissionBlock,
-            },
+            };
+            patch = {
+              ...patch,
+              prUrl: prResult.prUrl,
+              summary: result.summary,
+              nextAction: prResult.merged
+                ? `Issue PR merged into integration branch ${envelope.integrationBranch}: ${prResult.prUrl}`
+                : `Issue PR created on GitHub: ${prResult.prUrl}`,
+              changedFiles: prResult.changedFiles,
+            };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const isPermissionBlock = /Resource not accessible by personal access token/i.test(message);
+            result = {
+              ...result,
+              ok: false,
+              outcome: isPermissionBlock ? "blocked" : "fatal_error",
+              finishedAt: nowIso(),
+              error: message,
+              blockReason: isPermissionBlock ? message : undefined,
+              summary: `${result.summary ?? "PR artifact prepared."}\n\nIssue PR target: ${envelope.integrationBranch}\nPR creation/merge failed: ${message}`,
+              metadata: {
+                ...(result.metadata || {}),
+                branch: workspace.branch,
+                mergeTarget: envelope.integrationBranch,
+                permissionBlocked: isPermissionBlock,
+              },
+            };
+            patch = {
+              ...patch,
+              summary: result.summary,
+              nextAction: isPermissionBlock
+                ? "External blocker: GitHub token lacks pull-request permissions for create/view/merge."
+                : "PR creation failed; inspect worker log and retry after fixing the GitHub error.",
+              changedFiles: [],
+            };
+          }
+        } else {
+          result.summary = `${result.summary ?? "PR handover prepared."}\n\nShared working branch: ${envelope.workingBranch}\nFinal PR target: ${envelope.baseBranch}\nPer-issue commit will be created now.`;
+          result.metadata = {
+            ...(result.metadata || {}),
+            branch: envelope.workingBranch,
+            mergeTarget: envelope.baseBranch,
+            sharedBranch: true,
           };
           patch = {
-            branch: workspace.branch,
-            branchCreated: workspace.remoteBranchExists,
+            ...patch,
             summary: result.summary,
-            nextAction: isPermissionBlock
-              ? "External blocker: GitHub token lacks pull-request permissions for create/view/merge."
-              : "PR creation failed; inspect worker log and retry after fixing the GitHub error.",
-            changedFiles: [],
+            nextAction: `Finalize the per-issue commit on shared working branch ${envelope.workingBranch}.`,
           };
         }
       }
@@ -1115,18 +1335,62 @@ PR creation/merge failed: ${message}`,
         currentPhase: nextPhase,
       });
     }
+
+    if (envelope.branchStrategy === "shared" && issueStartSha) {
+      const commitResult = await finalizeSharedIssueCommit({
+        repoPath,
+        issueNumber: issueRef.issue,
+        issueTitle: issueRef.title,
+        issueStartSha,
+      });
+      await persistIssue(run, issueRef, execution, undefined, {
+        branch: envelope.workingBranch,
+        branchMode: "shared",
+        workingBranch: envelope.workingBranch,
+        worktree: null,
+        branchCreated: sharedWorkspace?.remoteBranchExists ?? false,
+        issueStartSha: commitResult.issueStartSha,
+        issueEndSha: commitResult.issueEndSha,
+        issueDiffBaseSha: commitResult.issueDiffBaseSha,
+        commitSha: commitResult.commitSha,
+        commitMessage: commitResult.commitMessage,
+        changedFiles: commitResult.changedFiles,
+        summary: commitResult.commitSha
+          ? `Committed issue changes on ${envelope.workingBranch}: ${commitResult.commitSha}`
+          : `No repository changes were detected for this issue on ${envelope.workingBranch}.`,
+        nextAction: commitResult.commitSha
+          ? `Continue with the next issue on the shared working branch ${envelope.workingBranch}.`
+          : "No code commit was needed for this issue; continue with the next issue.",
+      });
+      run = await saveRunState({
+        ...run,
+        currentHeadSha: commitResult.issueEndSha,
+        updatedAt: nowIso(),
+      }, intake);
+    }
+  }
+
+  if (envelope.branchStrategy === "shared") {
+    await ensureBranchPushed(repoPath, envelope.workingBranch);
   }
 
   const finalPr = await ensureFinalPullRequest({
     repoSlug: envelope.targetRepo,
     repoPath,
     baseBranch: envelope.baseBranch,
-    integrationBranch: envelope.integrationBranch,
+    headBranch: envelope.branchStrategy === "isolated" ? (envelope.integrationBranch || envelope.workingBranch) : envelope.workingBranch,
+    title: envelope.branchStrategy === "isolated"
+      ? `chore: merge ${envelope.integrationBranch || envelope.workingBranch} into ${envelope.baseBranch}`
+      : `chore: merge ${envelope.workingBranch} into ${envelope.baseBranch}`,
+    body: envelope.branchStrategy === "isolated"
+      ? `Automated Coding Factory final integration PR.\n\nBase branch: ${envelope.baseBranch}\nIntegration branch: ${envelope.integrationBranch || envelope.workingBranch}`
+      : `Automated Coding Factory final PR.\n\nBase branch: ${envelope.baseBranch}\nWorking branch: ${envelope.workingBranch}`,
   });
 
   run = await refreshRunExecution({
     ...run,
-    integrationBranch: envelope.integrationBranch,
+    integrationBranch: envelope.integrationBranch ?? null,
+    currentHeadSha: envelope.branchStrategy === "shared" ? await getHeadSha(repoPath) : run.currentHeadSha ?? null,
     finalPrUrl: finalPr.prUrl,
     finalPrNumber: finalPr.prNumber,
     finalPrState: finalPr.state,
@@ -1146,6 +1410,7 @@ PR creation/merge failed: ${message}`,
     exitCode: 0,
   });
 }
+
 
 main().catch(async (error) => {
   await updateSupervisor({

@@ -55,6 +55,9 @@ type Issue = {
   title: string;
   repo: string;
   branch: string;
+  branchMode?: "shared" | "isolated";
+  workingBranch?: string;
+  worktree?: string | null;
   baseBranch: string;
   size: string;
   phase: string;
@@ -64,6 +67,8 @@ type Issue = {
   startedAt: string;
   updatedAt: string;
   duration?: number | null;
+  commitSha?: string;
+  commitMessage?: string;
   history: IssueHistory[];
   handover?: IssueHandover;
 };
@@ -73,6 +78,8 @@ type RunState = {
   mode: "single" | "batch";
   targetRepo: string;
   baseBranch: string;
+  branchStrategy: "shared" | "isolated";
+  workingBranch: string;
   integrationBranch?: string | null;
   selectedIssues: Array<{
     issue: number;
@@ -94,6 +101,8 @@ type RunState = {
 type CodingFactoryData = {
   isRunning: boolean;
   status: string;
+  branchStrategy: "shared" | "isolated";
+  workingBranch: string;
   integrationBranch: string | null;
   finalPrUrl: string | null;
   finalPrNumber: number | null;
@@ -342,8 +351,11 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issue: Pick
           <p className="mt-1 text-sm text-stone-700 dark:text-[#c7d0d9]">{issue.title}</p>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-400 dark:text-[#7a8591]">
             <span className="inline-flex items-center gap-1">
-              <GitBranch className="h-3 w-3" /> {issue.branch || "no branch yet"}
+              <GitBranch className="h-3 w-3" /> {issue.branch || issue.workingBranch || "no branch yet"}
             </span>
+            {issue.branchMode && (
+              <span>{issue.branchMode}</span>
+            )}
             <span className="inline-flex items-center gap-1">
               <Clock className="h-3 w-3" /> {formatUpdatedAt(issue.updatedAt)}
             </span>
@@ -435,6 +447,12 @@ function IssueCard({ issue, onViewLog }: { issue: Issue; onViewLog: (issue: Pick
                 </span>
               ))}
             </div>
+          )}
+          {issue.commitMessage && (
+            <p className="mt-2 text-[11px] text-stone-500 dark:text-[#8d98a5]">
+              Commit: {issue.commitMessage}
+              {issue.commitSha ? ` (${issue.commitSha.slice(0, 8)})` : ""}
+            </p>
           )}
           {issue.handover.changedFiles && issue.handover.changedFiles.length > 0 && (
             <p className="mt-2 text-[11px] text-stone-500 dark:text-[#8d98a5]">
@@ -669,6 +687,8 @@ export function NightModeView({ legacy }: { legacy?: boolean }) {
             <CodingFactoryRunSummary
               isRunning={data.isRunning}
               status={data.status}
+              branchStrategy={data.branchStrategy}
+              workingBranch={data.workingBranch}
               integrationBranch={data.integrationBranch}
               startedAt={data.startedAt}
               stats={data.stats}

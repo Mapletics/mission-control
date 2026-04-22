@@ -6,6 +6,7 @@ import {
   CODING_FACTORY_SUPERVISOR_PATH,
   DEFAULT_TARGET_REPO,
   createDraftRunState,
+  deriveDefaultWorkingBranch,
   readIssueStates,
   readRunState,
   readSupervisorHealth,
@@ -19,6 +20,7 @@ import {
   type CodingFactorySupervisorState,
   type IssueRef,
 } from "@/lib/coding-factory";
+import type { CodingFactoryBranchStartMode, CodingFactoryBranchStrategy } from "@/lib/coding-factory/types";
 import { applyRunTransition, isTerminalIssueState } from "@/lib/coding-factory-state-machine";
 import { resolvePhaseConfig } from "@/lib/coding-factory/config";
 import { createCodingFactoryOrchestrator, deriveIntegrationBranchName } from "@/lib/coding-factory-orchestrator";
@@ -62,6 +64,9 @@ export type CodingFactoryLaunchInput = {
   mode: CodingFactoryMode;
   targetRepo: string;
   baseBranch: string;
+  branchStrategy: CodingFactoryBranchStrategy;
+  workingBranch: string;
+  branchStartMode: CodingFactoryBranchStartMode;
   selectedIssues: IssueRef[];
   launchIssues?: IssueRef[];
   runId?: string;
@@ -80,6 +85,9 @@ function getLaunchIssues(input: CodingFactoryLaunchInput): IssueRef[] {
 function validateLaunchInput(input: CodingFactoryLaunchInput): string | null {
   if (!REPO_PATTERN.test(input.targetRepo)) return "Invalid targetRepo (expected owner/repo).";
   if (!BRANCH_PATTERN.test(input.baseBranch)) return "Invalid baseBranch.";
+  if (!["shared", "isolated"].includes(input.branchStrategy)) return "Invalid branchStrategy.";
+  if (!BRANCH_PATTERN.test(input.workingBranch)) return "Invalid workingBranch.";
+  if (!["existing", "create-from-base"].includes(input.branchStartMode)) return "Invalid branchStartMode.";
   if (!ALLOWED_TARGET_REPOS.has(input.targetRepo)) {
     const allowedRepos = [...ALLOWED_TARGET_REPOS].join(", ");
     return `Unsupported targetRepo: ${input.targetRepo}. Allowed repos: ${allowedRepos}.`;
@@ -280,6 +288,8 @@ function createSupervisorState(
     pid,
     targetRepo: input.targetRepo,
     baseBranch: input.baseBranch,
+    branchStrategy: input.branchStrategy,
+    workingBranch: input.workingBranch,
     issueKeys: launchIssues.map((issue) => issue.issueKey),
     issueNumbers: launchIssues.map((issue) => issue.issue),
     selectedIssues: launchIssues,
@@ -321,23 +331,31 @@ export async function launchCodingFactoryRun(input: CodingFactoryLaunchInput): P
 
   const now = new Date().toISOString();
   const draftInput: CodingFactoryIntakeState = {
-    version: 1,
+    version: 2,
     updatedAt: now,
     mode: input.mode,
     targetRepo: input.targetRepo,
     baseBranch: input.baseBranch,
+    branchStrategy: input.branchStrategy,
+    workingBranch: input.workingBranch,
+    branchStartMode: input.branchStartMode,
     selectedIssues: input.selectedIssues,
   };
 
   const currentRun = await readRunState(draftInput);
   const resolvedRunId = input.runId || (input.source === "resume" ? currentRun.runId : buildRunId());
-  const resolvedIntegrationBranch = currentRun.integrationBranch || deriveIntegrationBranchName(resolvedRunId);
+  const resolvedIntegrationBranch = input.branchStrategy === "isolated"
+    ? (currentRun.integrationBranch || deriveIntegrationBranchName(resolvedRunId))
+    : null;
   const runBase = input.source === "resume"
     ? {
         ...currentRun,
         mode: input.mode,
         targetRepo: input.targetRepo,
         baseBranch: input.baseBranch,
+        branchStrategy: input.branchStrategy,
+        workingBranch: input.workingBranch,
+        branchStartMode: input.branchStartMode,
         integrationBranch: resolvedIntegrationBranch,
         selectedIssues: input.selectedIssues,
         runId: resolvedRunId,
@@ -345,6 +363,9 @@ export async function launchCodingFactoryRun(input: CodingFactoryLaunchInput): P
     : {
         ...createDraftRunState(draftInput, "draft"),
         runId: resolvedRunId,
+        branchStrategy: input.branchStrategy,
+        workingBranch: input.workingBranch,
+        branchStartMode: input.branchStartMode,
         integrationBranch: resolvedIntegrationBranch,
       };
 
@@ -353,7 +374,10 @@ export async function launchCodingFactoryRun(input: CodingFactoryLaunchInput): P
     runId: queuedRun.runId,
     targetRepo: input.targetRepo,
     baseBranch: input.baseBranch,
-    integrationBranch: queuedRun.integrationBranch || resolvedIntegrationBranch,
+    branchStrategy: input.branchStrategy,
+    workingBranch: input.workingBranch,
+    branchStartMode: input.branchStartMode,
+    integrationBranch: queuedRun.integrationBranch || resolvedIntegrationBranch || undefined,
     selectedIssues: getLaunchIssues(input).map((issue) => ({
       issue: issue.issue,
       issueKey: issue.issueKey,
@@ -487,6 +511,9 @@ export async function buildResumeLaunchInput(runId: string): Promise<CodingFacto
     mode: run.mode,
     targetRepo: run.targetRepo,
     baseBranch: run.baseBranch,
+    branchStrategy: run.branchStrategy,
+    workingBranch: run.workingBranch || deriveDefaultWorkingBranch(run.baseBranch),
+    branchStartMode: run.branchStartMode,
     selectedIssues: run.selectedIssues,
     launchIssues: resumableIssues,
     runId: run.runId,

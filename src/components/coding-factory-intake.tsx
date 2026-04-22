@@ -8,6 +8,8 @@ import { cn } from "@/lib/utils";
 import { FolderGit2, GitBranch, Plus, Save, Trash2 } from "lucide-react";
 
 export type CodingFactoryMode = "single" | "batch";
+export type CodingFactoryBranchStrategy = "shared" | "isolated";
+export type CodingFactoryBranchStartMode = "existing" | "create-from-base";
 
 export type IntakeIssue = {
   issue: number;
@@ -22,6 +24,9 @@ export type IntakeState = {
   mode: CodingFactoryMode;
   targetRepo: string;
   baseBranch: string;
+  branchStrategy: CodingFactoryBranchStrategy;
+  workingBranch: string;
+  branchStartMode: CodingFactoryBranchStartMode;
   selectedIssues: IntakeIssue[];
 };
 
@@ -81,6 +86,11 @@ function validateBranch(value: string): string | null {
   if (!value.trim()) return "Base branch is required";
   if (!BRANCH_PATTERN.test(value.trim())) return "Invalid branch name";
   return null;
+}
+
+function deriveDefaultWorkingBranch(baseBranch: string): string {
+  const normalizedBase = (baseBranch || "dev").trim() || "dev";
+  return `coding-factory/${normalizedBase.replace(/[^A-Za-z0-9._/-]+/g, "-")}`;
 }
 
 function validateIssueNumber(value: string): string | null {
@@ -157,6 +167,7 @@ export function CodingFactoryIntake({
 
   const targetRepoError = validateRepo(intake.targetRepo);
   const baseBranchError = validateBranch(intake.baseBranch);
+  const workingBranchError = validateBranch(intake.workingBranch);
   const manualIssueError = manualTouched.issue ? validateIssueNumber(manualIssue) : null;
   const manualAddDisabled = !!validateIssueNumber(manualIssue) || !!targetRepoError;
 
@@ -165,6 +176,9 @@ export function CodingFactoryIntake({
       ...nextState,
       targetRepo: nextState.targetRepo || intake.targetRepo,
       baseBranch: nextState.baseBranch || "dev",
+      workingBranch: nextState.workingBranch || deriveDefaultWorkingBranch(nextState.baseBranch || intake.baseBranch || "dev"),
+      branchStrategy: nextState.branchStrategy || "shared",
+      branchStartMode: nextState.branchStartMode || "create-from-base",
     });
   };
 
@@ -203,6 +217,7 @@ export function CodingFactoryIntake({
       ...intake,
       targetRepo,
       baseBranch: nextBaseBranch,
+      workingBranch: repoChanged ? deriveDefaultWorkingBranch(nextBaseBranch) : intake.workingBranch,
       selectedIssues: shouldClearIssues ? [] : intake.selectedIssues,
     });
   };
@@ -325,6 +340,69 @@ export function CodingFactoryIntake({
             />
           </div>
           <InlineError message={baseBranchError} />
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-3 md:grid-cols-3">
+        <div>
+          <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">Branch strategy</p>
+          <div className="flex items-center gap-1 rounded-lg bg-stone-100 p-0.5 dark:bg-[#20252a]">
+            {(["shared", "isolated"] as const).map((strategy) => (
+              <button
+                key={strategy}
+                type="button"
+                onClick={() => commit({ ...intake, branchStrategy: strategy })}
+                className={cn(
+                  "flex-1 rounded-md px-2.5 py-1 text-xs font-medium capitalize transition-colors",
+                  intake.branchStrategy === strategy
+                    ? "bg-white text-stone-900 shadow-sm dark:bg-[#171a1d] dark:text-[#f5f7fa]"
+                    : "text-stone-500 hover:text-stone-900 dark:text-[#8d98a5] dark:hover:text-[#f5f7fa]",
+                )}
+              >
+                {strategy}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">Branch start</p>
+          <div className="flex items-center gap-1 rounded-lg bg-stone-100 p-0.5 dark:bg-[#20252a]">
+            {(["create-from-base", "existing"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => commit({ ...intake, branchStartMode: mode })}
+                className={cn(
+                  "flex-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                  intake.branchStartMode === mode
+                    ? "bg-white text-stone-900 shadow-sm dark:bg-[#171a1d] dark:text-[#f5f7fa]"
+                    : "text-stone-500 hover:text-stone-900 dark:text-[#8d98a5] dark:hover:text-[#f5f7fa]",
+                )}
+              >
+                {mode === "create-from-base" ? "create from base" : "existing"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">
+            {intake.branchStrategy === "isolated" ? "Integration branch" : "Working branch"}
+          </p>
+          <div className="relative">
+            <GitBranch className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-stone-400 dark:text-[#7a8591]" />
+            <Input
+              value={intake.workingBranch}
+              onChange={(event) => commit({ ...intake, workingBranch: event.target.value })}
+              placeholder={deriveDefaultWorkingBranch(intake.baseBranch)}
+              className={cn("pl-9", workingBranchError && "border-red-300 dark:border-red-500/40")}
+            />
+          </div>
+          <InlineError message={workingBranchError} />
+          <p className="mt-1 text-[11px] text-stone-500 dark:text-[#8d98a5]">
+            Shared is the default. Shared reuses one branch for the whole run; isolated keeps per-issue branches/worktrees.
+          </p>
         </div>
       </div>
 

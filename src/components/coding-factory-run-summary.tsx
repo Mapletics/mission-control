@@ -19,6 +19,8 @@ type RunState = {
   mode: "single" | "batch";
   targetRepo: string;
   baseBranch: string;
+  branchStrategy: "shared" | "isolated";
+  workingBranch: string;
   integrationBranch?: string | null;
   selectedIssues: Array<{ issueKey: string }>;
   status: string;
@@ -34,6 +36,8 @@ type RunState = {
 type CodingFactoryRunSummaryProps = {
   isRunning: boolean;
   status: string;
+  branchStrategy: "shared" | "isolated";
+  workingBranch: string;
   integrationBranch: string | null;
   startedAt: string | null;
   stats: CodingFactoryStats;
@@ -67,6 +71,8 @@ function formatRunState(state: string | undefined): string {
 export function CodingFactoryRunSummary({
   isRunning,
   status,
+  branchStrategy,
+  workingBranch,
   integrationBranch,
   startedAt,
   stats,
@@ -116,11 +122,15 @@ export function CodingFactoryRunSummary({
         {/* Compact metadata */}
         <div className="flex items-center gap-3 text-xs text-stone-400 dark:text-[#7a8591]">
           <span className="flex items-center gap-1">
-            <GitBranch className="h-3 w-3" /> {summaryRun.baseBranch}
+            <GitBranch className="h-3 w-3" /> base: {summaryRun.baseBranch}
           </span>
-          {integrationBranch && (
+          <span className="flex items-center gap-1">
+            <GitBranch className="h-3 w-3" /> {branchStrategy === "isolated" ? "integration" : "working"}: {workingBranch}
+          </span>
+          <span>{branchStrategy}</span>
+          {integrationBranch && integrationBranch !== workingBranch && (
             <span className="flex items-center gap-1">
-              <GitBranch className="h-3 w-3" /> {integrationBranch}
+              <GitBranch className="h-3 w-3" /> integration: {integrationBranch}
             </span>
           )}
           <span>{summaryRun.selectedIssues.length} issues</span>
@@ -146,7 +156,7 @@ export function CodingFactoryRunSummary({
         <div className="mt-3 border-t border-stone-100 pt-3 dark:border-[#23282e]">
           {summaryRun.finalPrUrl && (
             <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px] text-stone-600 dark:text-[#cbd3dc]">
-              <span className="font-semibold uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">Final PR</span>
+              <span className="font-semibold uppercase tracking-wide text-stone-500 dark:text-[#8d98a5]">Final PR ({branchStrategy === "isolated" ? "integration" : "shared branch"})</span>
               <a href={summaryRun.finalPrUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-300">
                 <ExternalLink className="h-3 w-3" /> {summaryRun.finalPrUrl}
               </a>
